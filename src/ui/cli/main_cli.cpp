@@ -20,6 +20,22 @@ int main(int argc, char *argv[]) {
       cliroot.displayHelp();
       return EXIT_SUCCESS;
     }
+    else if (s == "--rmf") {
+      if (cliroot.exportMode == CLIExportMode::RMIOnly) {
+        cerr << "Error: --rmf and --rmi are mutually exclusive" << endl;
+        cliroot.displayUsage();
+        return EXIT_FAILURE;
+      }
+      cliroot.exportMode = CLIExportMode::RMFOnly;
+    }
+    else if (s == "--rmi") {
+      if (cliroot.exportMode == CLIExportMode::RMFOnly) {
+        cerr << "Error: --rmf and --rmi are mutually exclusive" << endl;
+        cliroot.displayUsage();
+        return EXIT_FAILURE;
+      }
+      cliroot.exportMode = CLIExportMode::RMIOnly;
+    }
     else if (s == "-o") {
       if (i == argc - 1) {
         cerr << "Error: expected output directory" << endl;

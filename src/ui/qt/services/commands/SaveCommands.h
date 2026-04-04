@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Format.h"
+#include "GeneralCommands.h"
 #include "services/MenuManager.h"
 #include "VGMSeq.h"
 #include "VGMInstrSet.h"
@@ -14,6 +15,8 @@
 #include "VGMExport.h"
 #include "VGMColl.h"
 #include "formats/common/YM2151InstrSet.h"
+
+#include <set>
 
 namespace fs = std::filesystem;
 using MenuPath = Command::MenuPath;
@@ -192,6 +195,225 @@ public:
   [[nodiscard]] std::optional<MenuPath> menuPath() const override { return MenuPaths::Convert; }
 };
 
+inline VGMColl* resolveCollectionForCompleteSequenceExport(VGMSeq* seq, const char* formatName) {
+  if (seq == nullptr || seq->assocColls.empty()) {
+    return nullptr;
+  }
+
+  if (seq->assocColls.size() > 1) {
+    pRoot->UI_toast(std::string("More than one collection is associated with the selected sequence. The first associated collection will be used for ") +
+                        formatName + " export.",
+                    ToastType::Warning,
+                    12000);
+  }
+
+  return seq->assocColls.front();
+}
+
+inline std::vector<VGMColl*> resolveCollectionsForCompleteSequenceExport(const std::vector<VGMSeq*>& sequences,
+                                                                         const char* formatName) {
+  std::vector<VGMColl*> collections;
+  std::set<VGMColl*> seen;
+
+  for (auto *seq : sequences) {
+    auto *coll = resolveCollectionForCompleteSequenceExport(seq, formatName);
+    if (coll != nullptr && seen.insert(coll).second) {
+      collections.push_back(coll);
+    }
+  }
+
+  return collections;
+}
+
+inline std::vector<VGMSeq*> extractSequencesForCompleteExport(const std::vector<VGMFile*>& items) {
+  std::vector<VGMSeq*> sequences;
+  sequences.reserve(items.size());
+
+  for (auto *item : items) {
+    if (auto *seq = dynamic_cast<VGMSeq*>(item)) {
+      sequences.push_back(seq);
+    }
+  }
+
+  return sequences;
+}
+
+inline void exportSingleCollectionAsRMF(VGMColl& coll) {
+  auto suggestedFilename = makeSafeFileName(coll.name());
+  const bool requiresZmf = conversion::requiresZmfForRMF(coll);
+
+  std::vector<SaveFileDialogFilter> filters;
+  if (requiresZmf) {
+    filters.push_back({"Zefie Music Format (*.zmf)", "zmf"});
+  }
+  else {
+    filters.push_back({"Rich Music Format (*.rmf)", "rmf"});
+    filters.push_back({"Zefie Music Format (*.zmf)", "zmf"});
+  }
+
+  const auto path = openSaveFileDialog(suggestedFilename, filters, requiresZmf ? "zmf" : "rmf");
+  if (path.empty()) {
+    return;
+  }
+
+  std::filesystem::path actualPath = path;
+  if (!conversion::saveAsRMF(coll, path, &actualPath)) {
+    pRoot->UI_toast("RMF export failed.", ToastType::Error);
+    return;
+  }
+
+  if (actualPath.extension() != path.extension()) {
+    pRoot->UI_toast("The export was written as ZMF because RMF cannot represent one or more loop settings in this collection.",
+                    ToastType::Info,
+                    12000);
+  }
+}
+
+inline void exportCollectionsAsRMF(const std::vector<VGMColl*>& collections) {
+  if (collections.empty()) {
+    return;
+  }
+
+  if (collections.size() == 1) {
+    exportSingleCollectionAsRMF(*collections.front());
+    return;
+  }
+
+  const auto outputDir = openSaveDirDialog();
+  if (outputDir.empty()) {
+    return;
+  }
+
+  std::vector<std::string> failedCollections;
+  for (auto *coll : collections) {
+    auto outputPath = outputDir / makeSafeFileName(coll->name());
+    outputPath.replace_extension(".rmf");
+
+    std::filesystem::path actualPath = outputPath;
+    if (!conversion::saveAsRMF(*coll, outputPath, &actualPath)) {
+      failedCollections.push_back(coll->name());
+    }
+  }
+
+  if (!failedCollections.empty()) {
+    pRoot->UI_toast("One or more RMF exports failed.", ToastType::Error);
+  }
+}
+
+inline void exportSingleCollectionAsRMI(VGMColl& coll) {
+  auto suggestedFilename = makeSafeFileName(coll.name());
+  const auto path = openSaveFileDialog(suggestedFilename,
+                                       {{"Rich MIDI with embedded DLS (*.rmi)", "rmi"}},
+                                       "rmi");
+  if (path.empty()) {
+    return;
+  }
+
+  if (!conversion::saveAsRMI(coll, path)) {
+    pRoot->UI_toast("RMI export failed.", ToastType::Error);
+  }
+}
+
+inline void exportCollectionsAsRMI(const std::vector<VGMColl*>& collections) {
+  if (collections.empty()) {
+    return;
+  }
+
+  if (collections.size() == 1) {
+    exportSingleCollectionAsRMI(*collections.front());
+    return;
+  }
+
+  const auto outputDir = openSaveDirDialog();
+  if (outputDir.empty()) {
+    return;
+  }
+
+  bool hadFailure = false;
+  for (auto *coll : collections) {
+    auto outputPath = outputDir / makeSafeFileName(coll->name());
+    outputPath.replace_extension(".rmi");
+
+    if (!conversion::saveAsRMI(*coll, outputPath)) {
+      hadFailure = true;
+    }
+  }
+
+  if (hadFailure) {
+    pRoot->UI_toast("One or more RMI exports failed.", ToastType::Error);
+  }
+}
+
+class ExportAsRMFCompleteCommand : public Command {
+public:
+  void execute(CommandContext& context) override {
+    auto& itemContext = dynamic_cast<ItemListCommandContext<VGMFile>&>(context);
+    auto sequences = extractSequencesForCompleteExport(itemContext.items());
+    auto collections = resolveCollectionsForCompleteSequenceExport(sequences, "RMF");
+    if (collections.empty()) {
+      pRoot->UI_toast("This action requires the selected sequence to belong to a collection with instruments and samples.",
+                      ToastType::Error,
+                      12000);
+      return;
+    }
+
+    exportCollectionsAsRMF(collections);
+  }
+
+  [[nodiscard]] std::string name() const override { return "Export as RMF (Complete)"; }
+
+  [[nodiscard]] std::shared_ptr<CommandContextFactory> contextFactory() const override {
+    return std::make_shared<ItemListContextFactory<VGMFile>>();
+  }
+
+  [[nodiscard]] std::optional<MenuPath> menuPath() const override { return MenuPaths::Convert; }
+};
+
+class ExportAsRMICompleteCommand : public Command {
+public:
+  void execute(CommandContext& context) override {
+    auto& itemContext = dynamic_cast<ItemListCommandContext<VGMFile>&>(context);
+    auto sequences = extractSequencesForCompleteExport(itemContext.items());
+    auto collections = resolveCollectionsForCompleteSequenceExport(sequences, "RMI");
+    if (collections.empty()) {
+      pRoot->UI_toast("This action requires the selected sequence to belong to a collection with instruments and samples.",
+                      ToastType::Error,
+                      12000);
+      return;
+    }
+
+    exportCollectionsAsRMI(collections);
+  }
+
+  [[nodiscard]] std::string name() const override { return "Save as RMI (Complete)"; }
+
+  [[nodiscard]] std::shared_ptr<CommandContextFactory> contextFactory() const override {
+    return std::make_shared<ItemListContextFactory<VGMFile>>();
+  }
+
+  [[nodiscard]] std::optional<MenuPath> menuPath() const override { return MenuPaths::Convert; }
+};
+
+class ExportCollAsRMFCommand : public ItemListCommand<VGMColl> {
+public:
+  void executeItems(std::vector<VGMColl*> collections) const override {
+    exportCollectionsAsRMF(collections);
+  }
+
+  [[nodiscard]] std::string name() const override { return "Export as RMF"; }
+  [[nodiscard]] std::optional<MenuPath> menuPath() const override { return MenuPaths::Convert; }
+};
+
+class ExportCollAsRMICommand : public ItemListCommand<VGMColl> {
+public:
+  void executeItems(std::vector<VGMColl*> collections) const override {
+    exportCollectionsAsRMI(collections);
+  }
+
+  [[nodiscard]] std::string name() const override { return "Export as RMI"; }
+  [[nodiscard]] std::optional<MenuPath> menuPath() const override { return MenuPaths::Convert; }
+};
+
 
 class SaveAsDLSCommand : public SaveCommand<VGMInstrSet, VGMFile> {
 public:
@@ -261,6 +483,9 @@ public:
     }
     if constexpr ((options & conversion::Target::DLS) != 0) {
       parts.emplace_back("DLS");
+    }
+    if constexpr ((options & conversion::Target::RMF) != 0) {
+      parts.emplace_back("RMF");
     }
 
     std::string name = "Export as ";

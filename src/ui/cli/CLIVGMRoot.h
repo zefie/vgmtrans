@@ -14,6 +14,12 @@
 
 namespace fs = std::filesystem;
 
+enum class CLIExportMode {
+  Default,
+  RMFOnly,
+  RMIOnly,
+};
+
 class CLIVGMRoot : public VGMRoot {
 
 public:
@@ -38,6 +44,10 @@ public:
 
   bool saveDLS(VGMColl *coll);
 
+  bool saveRMF(VGMColl *coll);
+
+  bool saveRMI(const VGMColl *coll);
+
   bool openRawFile(const std::filesystem::path &filename) override;
 
   bool init() override;
@@ -53,6 +63,7 @@ public:
 
   std::set<fs::path> inputFiles = {};
   fs::path outputDir = fs::path(".");
+  CLIExportMode exportMode = CLIExportMode::Default;
 };
 
 extern CLIVGMRoot cliroot;

@@ -13,3 +13,6 @@
 [submodule "lib/qwindowkit"]
 	path = lib/qwindowkit
 	url = https://github.com/stdware/qwindowkit.git
+[submodule "lib/neobae"]
+	path = lib/neobae
+	url = https://github.com/zefie/NeoBAE

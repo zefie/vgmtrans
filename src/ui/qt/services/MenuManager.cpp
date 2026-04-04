@@ -62,6 +62,8 @@ MenuManager::MenuManager() {
       std::make_shared<PlayCommand>(),
       std::make_shared<CommandSeparator>(),      std::make_shared<SaveCollCommand<conversion::Target::MIDI | conversion::Target::SF2>>(),
       std::make_shared<SaveCollCommand<conversion::Target::MIDI | conversion::Target::DLS>>(),
+      std::make_shared<ExportCollAsRMFCommand>(),
+      std::make_shared<ExportCollAsRMICommand>(),
       std::make_shared<SaveCollCommand<conversion::Target::MIDI | conversion::Target::SF2
                        | conversion::Target::DLS>>(),
       std::make_shared<CommandSeparator>(),

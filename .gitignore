@@ -215,3 +215,7 @@ junk/
 *.mid
 *.dls
 *.sf2
+*.rmf
+*.zmf
+*.rmi
+build/

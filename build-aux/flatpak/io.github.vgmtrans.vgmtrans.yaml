@@ -13,6 +13,20 @@ finish-args:
   - --device=dri
 
 modules:
+  - name: xz
+    buildsystem: autotools
+    config-opts:
+      - --disable-xz
+      - --disable-xzdec
+      - --disable-lzmadec
+      - --disable-lzmainfo
+      - --disable-scripts
+      - --disable-doc
+    sources:
+      - type: archive
+        url: https://github.com/tukaani-project/xz/releases/download/v5.8.3/xz-5.8.3.tar.gz
+        sha256: 3d3a1b973af218114f4f889bbaa2f4c037deaae0c8e815eec381c3d546b974a0
+
   - name: VGMTrans
     buildsystem: cmake-ninja
     config-opts:
@@ -23,6 +37,7 @@ modules:
       - -DNO_QT_DEPLOY=ON
       - -DINSTALL_CHANGELOG=ON
       - -DUSE_SYSTEM_ZLIB=ON
+      - -DUSE_SYSTEM_LZMA=ON
       - -DVGMTRANS_DATA_DIR=/app/share/vgmtrans
     sources:
       - type: dir

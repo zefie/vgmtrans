@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 #include <QColor>
 #include <QIcon>
 #include <QPalette>
@@ -41,5 +42,13 @@ void refreshStencilToolButton(QToolButton *button, const QString &iconPath, cons
 QString toolBarTextButtonStyle(const QPalette &palette, int leftMargin = 0);
 
 std::filesystem::path openSaveDirDialog();
+struct SaveFileDialogFilter {
+    std::string nameFilter;
+    std::string extension;
+};
+
+std::filesystem::path openSaveFileDialog(const std::filesystem::path& suggested_filename,
+                                                                                 const std::vector<SaveFileDialogFilter>& filters,
+                                                                                 const std::string& defaultExtension = "");
 std::filesystem::path openSaveFileDialog(const std::filesystem::path& suggested_filename, const std::string& extension);
 std::filesystem::path openFolderDialog(const std::filesystem::path& suggestedPath, std::string_view reason);

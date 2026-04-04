@@ -1,11 +1,5 @@
 name: Build
 on: 
-  push:
-    branches:
-      - master
-    tags:
-      - '*'
-  pull_request:
   workflow_dispatch:
 
 env:
@@ -95,9 +89,32 @@ jobs:
         run: |
           echo "/usr/local/bin" >> "$GITHUB_PATH"
 
+      - name: "Install xz 5.8.3"
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/tukaani-project/xz/releases/download/v5.8.3/xz-5.8.3.tar.gz | tar xz
+          cd xz-5.8.3
+
+          configure_args=(--prefix="$HOMEBREW_PREFIX" --enable-static --disable-shared)
+          if [[ "${{ matrix.target }}" == "intel" ]]; then
+            export CFLAGS="-arch x86_64h -mmacosx-version-min=13.0"
+            export CXXFLAGS="-arch x86_64h -mmacosx-version-min=13.0"
+            export LDFLAGS="-arch x86_64h -mmacosx-version-min=13.0"
+            configure_args+=(--host=x86_64-apple-darwin)
+          else
+            export CFLAGS="-arch arm64 -mmacosx-version-min=13.0"
+            export CXXFLAGS="-arch arm64 -mmacosx-version-min=13.0"
+            export LDFLAGS="-arch arm64 -mmacosx-version-min=13.0"
+          fi
+
+          ./configure "${configure_args[@]}"
+          make -j$(sysctl -n hw.logicalcpu)
+          sudo make install
+
       - name: "Prepare build"
         run: >
           cmake --preset "macos-${{ matrix.target }}" \
+            -DCMAKE_PREFIX_PATH="$HOMEBREW_PREFIX" \
             -DQT_DEBUG_FIND_PACKAGE=${{runner.debug == '1' && 'ON' || 'OFF' }} \
             -DCMAKE_VERBOSE_MAKEFILE=${{runner.debug == '1' && 'ON' || 'OFF' }} \
             -DCMAKE_FIND_DEBUG_MODE=${{runner.debug == '1' && 'ON' || 'OFF' }}
@@ -244,12 +261,24 @@ jobs:
            arch: 'win64_msvc2022_64'
            modules: 'all'
 
+       - name: "Install xz 5.8.3"
+         run: |
+           curl -fsSL -o xz.tar.gz https://github.com/tukaani-project/xz/releases/download/v5.8.3/xz-5.8.3.tar.gz
+           tar xzf xz.tar.gz
+           cd xz-5.8.3
+           cmake -B build `
+             -DCMAKE_BUILD_TYPE=Release `
+             -DCMAKE_INSTALL_PREFIX="C:/xz" `
+             -DBUILD_SHARED_LIBS=OFF
+           cmake --build build --config Release --target install
+
        - name: "Prepare build"
          run: |
           # Force to have a flat install package layout.
           # Windows users get frightened at the sight of GNU directories.
           cmake --preset win-${{ matrix.target }} `
             -DINSTALL_CHANGELOG=ON `
+            -DCMAKE_PREFIX_PATH="C:/xz" `
             -DQT_DEBUG_FIND_PACKAGE=${{runner.debug == '1' && 'ON' || 'OFF' }} `
             -DCMAKE_VERBOSE_MAKEFILE=${{runner.debug == '1' && 'ON' || 'OFF' }} `
             -DCMAKE_FIND_DEBUG_MODE=${{runner.debug == '1' && 'ON' || 'OFF' }} `
@@ -328,11 +357,11 @@ jobs:
     runs-on: ubuntu-slim
     needs: [prepare, macos, linux, windows]
     permissions:
-      contents: read
+      contents: write
     env:
-      VGMTRANS_PREVIEW_REPOSITORY: vgmtrans/vgmtrans-preview
+      VGMTRANS_PREVIEW_REPOSITORY: ${{ github.repository }}
       VGMTRANS_PREVIEW_TAG: unstable
-      VGMTRANS_PREVIEW_TARGET: main
+      VGMTRANS_PREVIEW_TARGET: master
       VGMTRANS_PREVIEW_VERSION: ${{ needs.prepare.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v6
@@ -373,20 +402,9 @@ jobs:
             printf -- "- Source branch: \`%s\`\n" "$SOURCE_BRANCH"
           } >> preview-release-notes.md
 
-      - name: Generate preview app token
-        id: preview-app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          # This is https://github.com/apps/vgmtrans-helper
-          app-id: ${{ vars.VGMTRANS_HELPER_APP_ID }}
-          private-key: ${{ secrets.VGMTRANS_HELPER_PRIVATE_KEY }}
-          owner: vgmtrans
-          repositories: |
-            vgmtrans-preview
-
       - name: Replace preview prerelease
         env:
-          GH_TOKEN: ${{ steps.preview-app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           mapfile -d '' release_files < <(find release-assets -type f -print0)

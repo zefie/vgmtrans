@@ -5,6 +5,37 @@
 # mio is a header-only library
 add_subdirectory(${PROJECT_SOURCE_DIR}/lib/mio ${CMAKE_CURRENT_BINARY_DIR}/lib/mio EXCLUDE_FROM_ALL)
 
+set(BAE_DISABLE_MTHC_SUPPORT ON CACHE BOOL "Disable MTHC support in Neobae")
+set(BAE_DISABLE_ADP_SUPPORT ON CACHE BOOL "Disable ADP support in Neobae")
+set(BAE_DISABLE_SF2_SUPPORT ON CACHE BOOL "Disable SF2 support in Neobae")
+set(BAE_DISABLE_BAESCRIPT ON CACHE BOOL "Disable BAESCRIPT support in Neobae")
+set(BAE_DISABLE_FLUIDSYNTH ON CACHE BOOL "Disable FLUIDSYNTH support in Neobae")
+set(BAE_DISABLE_XMF_SUPPORT ON CACHE BOOL "Disable XMF support in Neobae")
+set(BAE_DISABLE_EMBED_PATCHES ON CACHE BOOL "Disable EMBED_PATCHES support in Neobae")
+set(BAE_DISABLE_OPUS_ENCODER ON CACHE BOOL "Disable OPUS_ENCODER support in Neobae")
+set(BAE_DISABLE_OPUS_DECODER ON CACHE BOOL "Disable OPUS_DECODER support in Neobae")
+set(BAE_DISABLE_VORBIS_ENCODER ON CACHE BOOL "Disable VORBIS_ENCODER support in Neobae")
+set(BAE_DISABLE_VORBIS_DECODER ON CACHE BOOL "Disable VORBIS_DECODER support in Neobae")
+set(BAE_DISABLE_FLAC_ENCODER ON CACHE BOOL "Disable FLAC_ENCODER support in Neobae")
+set(BAE_DISABLE_FLAC_DECODER ON CACHE BOOL "Disable FLAC_DECODER support in Neobae")
+set(BAE_DISABLE_MP3_ENCODER ON CACHE BOOL "Disable MP3_ENCODER support in Neobae")
+set(BAE_DISABLE_MP3_DECODER ON CACHE BOOL "Disable MP3_DECODER support in Neobae")
+set(BAE_DISABLE_QOA_SUPPORT ON CACHE BOOL "Disable QOA support in Neobae")
+set(BAE_DISABLE_RETRO_RINGTONE_SUPPORT ON CACHE BOOL "Disable RETRO RINGTONE support in Neobae")
+set(BUILD_ZEFIDI OFF CACHE BOOL "Disable building ZEFIDI in Neobae")
+set(BUILD_CLITOOLS OFF CACHE BOOL "Disable building CLITOOLS in Neobae")
+set(BUILD_PLAYBAE OFF CACHE BOOL "Disable building PLAYBAE in Neobae")
+set(BUILD_NBSTUDIO OFF CACHE BOOL "Disable building NBSTUDIO in Neobae")
+
+add_subdirectory(${PROJECT_SOURCE_DIR}/lib/neobae ${CMAKE_CURRENT_BINARY_DIR}/lib/neobae EXCLUDE_FROM_ALL)
+
+# Enforce the Neobae feature profile from VGMTrans.
+target_compile_definitions(
+  neobae
+  PUBLIC
+    USE_ZMF_SUPPORT=1
+)
+
 # nhlohmann-json is a header-only library,
 # but some distros provide it as a system package
 if(USE_SYSTEM_NLOHMANN)
@@ -132,6 +163,7 @@ target_sources(vgmtranscore
     conversion/DLSConversion.cpp
     conversion/DLSFile.cpp
     conversion/MidiFile.cpp
+    conversion/RMFConversion.cpp
     conversion/RiffFile.cpp
     conversion/SF2Conversion.cpp
     conversion/SF2File.cpp
@@ -502,6 +534,7 @@ target_sources(vgmtranscore
       conversion/DLSConversion.h
       conversion/DLSFile.h
       conversion/MidiFile.h
+      conversion/RMFConversion.h
       conversion/RiffFile.h
       conversion/SF2Conversion.h
       conversion/SF2File.h
@@ -525,7 +558,7 @@ configure_file("version.h.in" "version.h")
 target_include_directories(vgmtranscore PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(
   vgmtranscore
-  PUBLIC spdlog::spdlog unarr ZLIB::ZLIB minizip mio chdr-static nlohmann_json::nlohmann_json
+  PUBLIC spdlog::spdlog unarr ZLIB::ZLIB minizip mio chdr-static nlohmann_json::nlohmann_json neobae
 )
 target_compile_features(vgmtranscore PUBLIC cxx_std_20)
 

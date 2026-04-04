@@ -7,11 +7,12 @@
 
 #include "common.h"
 #include "DLSFile.h"
+#include "RMFConversion.h"
 #include "SF2File.h"
 #include "VGMColl.h"
 #include "VGMSeq.h"
-#include "SF2Conversion.h"
 #include "DLSConversion.h"
+#include "SF2Conversion.h"
 
 /*
  * The following free functions implement
@@ -20,7 +21,7 @@
 
 namespace conversion {
 
-enum class Target : uint32_t { MIDI = 1u << 0u, DLS = 1u << 1u, SF2 = 1u << 2u };
+enum class Target : uint32_t { MIDI = 1u << 0u, DLS = 1u << 1u, SF2 = 1u << 2u, RMF = 1u << 3u };
 
 inline constexpr Target operator|(Target a, Target b) {
   return static_cast<Target>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
@@ -31,6 +32,7 @@ inline constexpr uint32_t operator&(Target a, Target b) {
 }
 
 bool saveAsDLS(VGMInstrSet &set, const std::filesystem::path &filepath);
+bool saveAsRMI(const VGMColl &coll, const std::filesystem::path &filepath);
 bool saveAsSF2(VGMInstrSet &set, const std::filesystem::path &filepath);
 
 void saveAllAsWav(const VGMSampColl &coll, const std::filesystem::path &save_dir);
@@ -65,6 +67,12 @@ void saveAs(const VGMColl &coll, const std::filesystem::path &dir_path) {
       sf2file->saveSF2File(sf2Path);
       delete sf2file;
     }
+  }
+
+  if constexpr ((options & Target::RMF) != 0) {
+    auto rmfPath = filepath;
+    rmfPath.replace_extension(".rmf");
+    saveAsRMF(coll, rmfPath);
   }
 }
 }

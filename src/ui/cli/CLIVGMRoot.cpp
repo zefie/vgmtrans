@@ -13,6 +13,7 @@
 #include "DLSFile.h"
 #include "LogManager.h"
 #include "SF2File.h"
+#include "VGMExport.h"
 #include "VGMColl.h"
 #include "VGMSeq.h"
 #include "SF2Conversion.h"
@@ -25,13 +26,16 @@ CLIVGMRoot cliroot;
 
 // displays a usage message
 void CLIVGMRoot::displayUsage() {
-  cerr << "Usage: " << CLI_APP_NAME << " input_file1 input_file2 ... -o output_directory" << endl;
+  cerr << "Usage: " << CLI_APP_NAME
+       << " [--rmf|--rmi] input_file1 input_file2 ... [-o output_directory]" << endl;
 }
 
 // displays a help message
 void CLIVGMRoot::displayHelp() {
   cerr << "VGMTrans version " << VGMTRANS_VERSION << endl;
-  cerr << "Converts music files used in console video games into industry-standard MIDI and DLS/SF2 files." << endl << endl;
+  cerr << "Converts music files used in console video games into industry-standard MIDI, DLS/SF2, and RMF files." << endl << endl;
+  cerr << "  --rmf    Export only RMF output, automatically using ZMF when the document requires it" << endl;
+  cerr << "  --rmi    Export only a RIFF MIDI file with an embedded DLS soundbank" << endl << endl;
   displayUsage();
 }
 
@@ -150,9 +154,18 @@ bool CLIVGMRoot::exportAllCollections() {
 }
 
 bool CLIVGMRoot::exportCollection(VGMColl* coll) {
-    string collName = coll->name();
-    cout << "Exporting: " << collName << endl;
-    return saveMidi(coll) & saveSF2(coll) & saveDLS(coll);
+  string collName = coll->name();
+  cout << "Exporting: " << collName << endl;
+
+  switch (exportMode) {
+    case CLIExportMode::RMFOnly:
+      return saveRMF(coll);
+    case CLIExportMode::RMIOnly:
+      return saveRMI(coll);
+    case CLIExportMode::Default:
+    default:
+      return saveMidi(coll) & saveSF2(coll) & saveDLS(coll);
+  }
 }
 
 bool CLIVGMRoot::saveMidi(const VGMColl* coll) {
@@ -203,6 +216,36 @@ bool CLIVGMRoot::saveDLS(VGMColl* coll) {
   }
   else {
     L_ERROR("Failed to save DLS file");
+  }
+  return success;
+}
+
+bool CLIVGMRoot::saveRMF(VGMColl* coll) {
+  string collName = coll->name();
+  auto filepath = UI_getSaveFilePath(collName, "rmf");
+  std::filesystem::path actual_filepath = filepath;
+  bool success = conversion::saveAsRMF(*coll, filepath, &actual_filepath);
+  if (success) {
+    if (actual_filepath != filepath) {
+      cout << "\tCannot save as RMF, saving as ZMF (a loop is under 20 frames long)" << endl;
+    }
+    cout << "\t" << actual_filepath << endl;
+  }
+  else {
+    L_ERROR("Failed to save RMF file");
+  }
+  return success;
+}
+
+bool CLIVGMRoot::saveRMI(const VGMColl* coll) {
+  string collName = coll->name();
+  auto filepath = UI_getSaveFilePath(collName, "rmi");
+  bool success = conversion::saveAsRMI(*coll, filepath);
+  if (success) {
+    cout << "\t" << filepath << endl;
+  }
+  else {
+    L_ERROR("Failed to save RMI file");
   }
   return success;
 }

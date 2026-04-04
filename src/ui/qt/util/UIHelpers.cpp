@@ -211,7 +211,9 @@ std::filesystem::path openFolderDialog(const std::filesystem::path& suggestedPat
   return {};
 }
 
-std::filesystem::path openSaveFileDialog(const std::filesystem::path& suggested_filename, const std::string& extension) {
+std::filesystem::path openSaveFileDialog(const std::filesystem::path& suggested_filename,
+                                         const std::vector<SaveFileDialogFilter>& filters,
+                                         const std::string& defaultExtension) {
   static QString selected_dir = QStandardPaths::writableLocation(QStandardPaths::MusicLocation);
 
   QFileDialog dialog(QApplication::activeWindow());
@@ -221,16 +223,22 @@ std::filesystem::path openSaveFileDialog(const std::filesystem::path& suggested_
 
   dialog.selectFile(QString::fromStdString(suggested_filename.string()));
 
-  if (extension == "mid") {
-    dialog.setDefaultSuffix("mid");
-    dialog.setNameFilter("Standard MIDI (*.mid)");
-  } else if (extension == "dls") {
-    dialog.setDefaultSuffix("dls");
-    dialog.setNameFilter("Downloadable Sound (*.dls)");
-  } else if (extension == "sf2") {
-    dialog.setDefaultSuffix("sf2");
-    dialog.setNameFilter("SoundFont\u00AE 2 (*.sf2)");
-  } else {
+  if (!filters.empty()) {
+    QStringList nameFilters;
+    for (const auto &filter : filters) {
+      nameFilters.push_back(QString::fromStdString(filter.nameFilter));
+    }
+    dialog.setNameFilters(nameFilters);
+
+    std::string effectiveDefaultExtension = defaultExtension;
+    if (effectiveDefaultExtension.empty()) {
+      effectiveDefaultExtension = filters.front().extension;
+    }
+    if (!effectiveDefaultExtension.empty()) {
+      dialog.setDefaultSuffix(QString::fromStdString(effectiveDefaultExtension));
+    }
+  }
+  else {
     dialog.setNameFilter("All files (*)");
   }
 
@@ -238,8 +246,43 @@ std::filesystem::path openSaveFileDialog(const std::filesystem::path& suggested_
     selected_dir = dialog.directory().absolutePath();
 
     const QString chosen = dialog.selectedFiles().at(0);
-    return std::filesystem::path(chosen.toStdWString());
+    std::filesystem::path path(chosen.toStdWString());
+    if (path.extension().empty()) {
+      const QString selectedFilter = dialog.selectedNameFilter();
+      std::string effectiveExtension = defaultExtension;
+      for (const auto &filter : filters) {
+        if (selectedFilter == QString::fromStdString(filter.nameFilter)) {
+          effectiveExtension = filter.extension;
+          break;
+        }
+      }
+
+      if (!effectiveExtension.empty()) {
+        path.replace_extension("." + effectiveExtension);
+      }
+    }
+    return path;
   }
 
   return {};
+}
+
+std::filesystem::path openSaveFileDialog(const std::filesystem::path& suggested_filename, const std::string& extension) {
+  if (extension == "mid") {
+    return openSaveFileDialog(suggested_filename,
+                              {{"Standard MIDI (*.mid)", "mid"}},
+                              "mid");
+  }
+  if (extension == "dls") {
+    return openSaveFileDialog(suggested_filename,
+                              {{"Downloadable Sound (*.dls)", "dls"}},
+                              "dls");
+  }
+  if (extension == "sf2") {
+    return openSaveFileDialog(suggested_filename,
+                              {{"SoundFont\u00AE 2 (*.sf2)", "sf2"}},
+                              "sf2");
+  }
+
+  return openSaveFileDialog(suggested_filename, {}, "");
 }
