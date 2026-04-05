@@ -215,7 +215,7 @@ jobs:
       matrix:
         # We don't want to ship two Windows builds to users and clang performance is superior.
         # Keep MSVC coverage for pull requests only.
-        target: ${{ fromJSON(needs.prepare.outputs.windows_targets) }}
+        target: [ 'x64-clang' ]
     permissions:
       id-token: write
       contents: read
