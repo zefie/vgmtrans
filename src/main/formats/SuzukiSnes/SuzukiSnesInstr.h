@@ -20,12 +20,12 @@ class SuzukiSnesInstrSet:
                      uint16_t addrVolumeTable,
                      uint16_t addrADSRTable,
                      uint16_t addrTuningTable,
-                     uint16_t addrDrumKitTable,
                      const std::string &name = "SuzukiSnesInstrSet");
-  virtual ~SuzukiSnesInstrSet();
+  ~SuzukiSnesInstrSet() override = default;
 
-  virtual bool parseHeader();
-  virtual bool parseInstrPointers();
+  bool parseHeader() override;
+  bool parseInstrPointers() override;
+  void useColl(const VGMColl* coll) override;
 
   SuzukiSnesVersion version;
 
@@ -35,8 +35,6 @@ class SuzukiSnesInstrSet:
   uint16_t addrVolumeTable;
   uint16_t addrTuningTable;
   uint16_t addrADSRTable;
-  uint16_t addrDrumKitTable;
-  std::vector<uint8_t> usedSRCNs;
 };
 
 // *************
@@ -85,7 +83,7 @@ public:
                     uint16_t addrADSRTable,
                     uint16_t addrDrumKitTable,
                   const std::string &name = "SuzukiSnesDrumKit");
-  ~SuzukiSnesDrumKit() override;
+  ~SuzukiSnesDrumKit() override = default;
 
   bool loadInstr() override;
 

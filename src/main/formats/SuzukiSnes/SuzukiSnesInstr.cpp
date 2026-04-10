@@ -5,8 +5,15 @@
  */
 
 #include "SuzukiSnesInstr.h"
+#include "SuzukiSnesSeq.h"
 #include "SNESDSP.h"
+#include "VGMColl.h"
 #include <spdlog/fmt/fmt.h>
+
+namespace {
+constexpr uint8_t kSuzukiSnesSrcnCount = 0x40;
+constexpr uint16_t kSuzukiSnesSd3DrumKitOffset = 16;
+}
 
 // ******************
 // SuzukiSnesInstrSet
@@ -19,32 +26,27 @@ SuzukiSnesInstrSet::SuzukiSnesInstrSet(RawFile *file,
                                        uint16_t addrVolumeTable,
                                        uint16_t addrADSRTable,
                                        uint16_t addrTuningTable,
-                                       uint16_t addrDrumKitTable,
                                        const std::string &name) :
-    VGMInstrSet(SuzukiSnesFormat::name, file, addrDrumKitTable, 0, name), version(ver),
+    VGMInstrSet(SuzukiSnesFormat::name, file, addrSRCNTable, 0, name), version(ver),
     spcDirAddr(spcDirAddr),
     addrSRCNTable(addrSRCNTable),
     addrVolumeTable(addrVolumeTable),
     addrADSRTable(addrADSRTable),
-    addrTuningTable(addrTuningTable),
-    addrDrumKitTable(addrDrumKitTable) {
+    addrTuningTable(addrTuningTable) {
 }
-
-SuzukiSnesInstrSet::~SuzukiSnesInstrSet() {}
 
 bool SuzukiSnesInstrSet::parseHeader() {
   return true;
 }
 
 bool SuzukiSnesInstrSet::parseInstrPointers() {
-  usedSRCNs.clear();
   for (uint8_t instrNum = 0; instrNum <= 0x7f; instrNum++) {
     uint32_t ofsSRCNEntry = addrSRCNTable + instrNum;
     if (ofsSRCNEntry + 1 > 0x10000) {
       continue;
     }
     uint8_t srcn = readByte(ofsSRCNEntry);
-    if (srcn >= 0x40) {
+    if (srcn >= kSuzukiSnesSrcnCount) {
       continue;
     }
 
@@ -81,8 +83,6 @@ bool SuzukiSnesInstrSet::parseInstrPointers() {
       continue;
     }
 
-    usedSRCNs.push_back(srcn);
-
     SuzukiSnesInstr *newInstr = new SuzukiSnesInstr(
       this, version, instrNum, spcDirAddr, addrSRCNTable, addrVolumeTable, addrADSRTable,
       addrTuningTable, fmt::format("Instrument: {:#x}", srcn));
@@ -92,20 +92,43 @@ bool SuzukiSnesInstrSet::parseInstrPointers() {
     return false;
   }
 
-  if (addrDrumKitTable && readByte(addrDrumKitTable) < 0x80) {
-    SuzukiSnesDrumKit *newDrumKitInstr = new SuzukiSnesDrumKit(this, version, DRUMKIT_PROGRAM,
-      spcDirAddr, addrSRCNTable, addrTuningTable, addrADSRTable, addrDrumKitTable, "Drum Kit");
-    aInstrs.push_back(newDrumKitInstr);
-  }
-
-  std::sort(usedSRCNs.begin(), usedSRCNs.end());
-  SNESSampColl *newSampColl = new SNESSampColl(SuzukiSnesFormat::name, this->rawFile(), spcDirAddr, usedSRCNs);
+  // Load all valid Suzuki sample slots so conversion-time drumkits can reuse the base sample collection.
+  SNESSampColl *newSampColl = new SNESSampColl(
+      SuzukiSnesFormat::name, this->rawFile(), spcDirAddr, kSuzukiSnesSrcnCount);
   if (!newSampColl->loadVGMFile()) {
     delete newSampColl;
     return false;
   }
 
   return true;
+}
+
+void SuzukiSnesInstrSet::useColl(const VGMColl* coll) {
+  if (coll == nullptr || coll->seq() == nullptr) {
+    return;
+  }
+
+  const auto* seq = dynamic_cast<const SuzukiSnesSeq*>(coll->seq());
+  if (seq == nullptr || seq->rawFile() != rawFile() || seq->version != version) {
+    return;
+  }
+
+  uint16_t addrDrumKitTable = static_cast<uint16_t>(seq->offset());
+  if (version == SUZUKISNES_SD3) {
+    addrDrumKitTable += kSuzukiSnesSd3DrumKitOffset;
+  }
+  if (readByte(addrDrumKitTable) >= 0x80) {
+    return;
+  }
+
+  auto* drumKit = new SuzukiSnesDrumKit(this, version, DRUMKIT_PROGRAM, spcDirAddr, addrSRCNTable,
+                                        addrTuningTable, addrADSRTable, addrDrumKitTable, "Drum Kit");
+  if (!drumKit->loadInstr() || drumKit->regions().empty()) {
+    delete drumKit;
+    return;
+  }
+
+  addTempInstr(drumKit);
 }
 
 // ***************
@@ -176,9 +199,6 @@ SuzukiSnesDrumKit::SuzukiSnesDrumKit(VGMInstrSet *instrSet,
   addrTuningTable(addrTuningTable),
   addrADSRTable(addrADSRTable),
   addrDrumKitTable(addrDrumKitTable) {
-}
-
-SuzukiSnesDrumKit::~SuzukiSnesDrumKit() {
 }
 
 bool SuzukiSnesDrumKit::loadInstr() {
