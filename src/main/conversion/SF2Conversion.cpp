@@ -17,16 +17,7 @@
 namespace conversion {
 
 SF2File* createSF2File(const VGMColl& coll) {
-  coll.preSynthFileCreation();
-  SynthFile *synthfile = createSynthFile(coll.instrSets(), coll.sampColls());
-  coll.postSynthFileCreation();
-  if (!synthfile) {
-    L_ERROR("SF2 conversion for aborted");
-    return nullptr;
-  }
-  SF2File *sf2file = new SF2File(synthfile);
-  delete synthfile;
-  return sf2file;
+  return createSF2File(coll.instrSets(), coll.sampColls(), &coll);
 }
 
 SF2File* createSF2File(
@@ -34,11 +25,15 @@ SF2File* createSF2File(
   const std::vector<VGMSampColl*>& sampcolls,
   const VGMColl* coll
 ) {
-  if (coll)
-    coll->preSynthFileCreation();
+  for (auto* instrset : instrsets) {
+    instrset->prepareForExport(coll);
+  }
+
   SynthFile *synthfile = createSynthFile(instrsets, sampcolls);
-  if (coll)
-    coll->postSynthFileCreation();
+
+  for (auto* instrset : instrsets) {
+    instrset->cleanupAfterExport();
+  }
   if (!synthfile) {
     L_ERROR("SF2 conversion failed");
     return nullptr;
@@ -86,9 +81,10 @@ SynthFile* createSynthFile(
 
   for (size_t inst = 0; inst < m_instrsets.size(); inst++) {
     const VGMInstrSet* set = m_instrsets[inst];
-    size_t nInstrs = set->aInstrs.size();
+    const auto& instrs = set->exportInstrs();
+    size_t nInstrs = instrs.size();
     for (size_t i = 0; i < nInstrs; i++) {
-      VGMInstr* vgminstr = set->aInstrs[i];
+      VGMInstr* vgminstr = instrs[i];
       size_t nRgns = vgminstr->regions().size();
       if (nRgns == 0)  // do not write an instrument if it has no regions
         continue;

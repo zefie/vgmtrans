@@ -41,11 +41,7 @@ void unpackSampColl(DLSFile &dls, const VGMSampColl *sampColl, std::vector<VGMSa
 }
 
 bool createDLSFile(DLSFile& dls, const VGMColl& coll) {
-  bool result = true;
-  coll.preSynthFileCreation();
-  result &= mainDLSCreation(dls, coll.instrSets(), coll.sampColls());
-  coll.postSynthFileCreation();
-  return result;
+  return createDLSFile(dls, coll.instrSets(), coll.sampColls(), &coll);
 }
 bool createDLSFile(
   DLSFile& dls,
@@ -54,11 +50,15 @@ bool createDLSFile(
   const VGMColl* coll
 ) {
   bool result = true;
-  if (coll)
-    coll->preSynthFileCreation();
+  for (auto* instrset : instrsets) {
+    instrset->prepareForExport(coll);
+  }
+
   result &= mainDLSCreation(dls, instrsets, sampcolls);
-  if (coll)
-    coll->postSynthFileCreation();
+
+  for (auto* instrset : instrsets) {
+    instrset->cleanupAfterExport();
+  }
   return result;
 }
 
@@ -90,16 +90,17 @@ bool mainDLSCreation(
     }
   }
 
-    if (finalSamps.empty()) {
-      L_ERROR("No sample collection available to create DLS");
-      return false;
-    }
+  if (finalSamps.empty()) {
+    L_ERROR("No sample collection available to create DLS");
+    return false;
+  }
 
   for (size_t inst = 0; inst < m_instrsets.size(); inst++) {
     VGMInstrSet *set = m_instrsets[inst];
-    size_t nInstrs = set->aInstrs.size();
+    const auto& instrs = set->exportInstrs();
+    size_t nInstrs = instrs.size();
     for (size_t i = 0; i < nInstrs; i++) {
-      VGMInstr* vgminstr = set->aInstrs[i];
+      VGMInstr* vgminstr = instrs[i];
       size_t nRgns = vgminstr->regions().size();
       std::string name = vgminstr->name();
       auto bank_no = vgminstr->bank;
