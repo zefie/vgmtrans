@@ -38,12 +38,13 @@ int main(int argc, char *argv[]) {
     }
     else if (s == "-o") {
       if (i == argc - 1) {
-        cerr << "Error: expected output directory" << endl;
+        cerr << "Error: expected output path" << endl;
         cliroot.displayUsage();
         return EXIT_FAILURE;
       }
       else {
         cliroot.outputDir = fs::path(argv[++i]);
+        cliroot.outputPathExplicitlySet = true;
       }
     }
     else {

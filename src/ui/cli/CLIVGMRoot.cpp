@@ -27,7 +27,7 @@ CLIVGMRoot cliroot;
 // displays a usage message
 void CLIVGMRoot::displayUsage() {
   cerr << "Usage: " << CLI_APP_NAME
-       << " [--rmf|--rmi] input_file1 input_file2 ... [-o output_directory]" << endl;
+  << " [--rmf|--rmi] input_file1 input_file2 ... [-o output_path]" << endl;
 }
 
 // displays a help message
@@ -36,6 +36,7 @@ void CLIVGMRoot::displayHelp() {
   cerr << "Converts music files used in console video games into industry-standard MIDI, DLS/SF2, and RMF files." << endl << endl;
   cerr << "  --rmf    Export only RMF output, automatically using ZMF when the document requires it" << endl;
   cerr << "  --rmi    Export only a RIFF MIDI file with an embedded DLS soundbank" << endl << endl;
+  cerr << "  With --rmf/--rmi and a single input, -o can be an output file path or an extensionless base name" << endl << endl;
   displayUsage();
 }
 
@@ -50,6 +51,11 @@ bool CLIVGMRoot::makeOutputDir() {
     cout << "Created new directory " + outputDir.string() << endl;
   }
   return true;
+}
+
+bool CLIVGMRoot::usesSingleFileOutputPath() const {
+  return outputPathExplicitlySet && inputFiles.size() == 1 &&
+         (exportMode == CLIExportMode::RMFOnly || exportMode == CLIExportMode::RMIOnly);
 }
 
 bool CLIVGMRoot::openRawFile(const fs::path& filename) {
@@ -140,6 +146,30 @@ bool CLIVGMRoot::init() {
 
     cout << "\nInput files:        " << inputFileCtr << endl;
     cout << "Output collections: " << numColls << endl << endl;
+
+    if (usesSingleFileOutputPath()) {
+      if (numColls != 1) {
+        cerr << "Error: -o output file can only be used when exactly one output collection is produced" << endl;
+        return false;
+      }
+
+      if (fs::exists(outputDir) && fs::is_directory(outputDir)) {
+        cerr << "Error: -o must point to an output file when using --rmf or --rmi with a single input" << endl;
+        return false;
+      }
+
+      const fs::path outputParent = outputDir.has_parent_path() ? outputDir.parent_path() : fs::path(".");
+      if (!fs::exists(outputParent)) {
+        std::error_code ec;
+        if (!fs::create_directories(outputParent, ec)) {
+          cerr << "Could not create directory " + outputParent.string() << endl;
+          return false;
+        }
+      }
+
+      return true;
+    }
+
     return makeOutputDir();
   }
 }
@@ -263,6 +293,14 @@ void CLIVGMRoot::UI_log(LogItem* theLog) {
 }
 
 std::filesystem::path CLIVGMRoot::UI_getSaveFilePath(const string& suggestedFilename, const string& extension) {
+  if (usesSingleFileOutputPath()) {
+    auto outputPath = outputDir;
+    if (!outputPath.has_extension()) {
+      outputPath.replace_extension("." + extension);
+    }
+    return outputPath;
+  }
+
   auto filename = makeSafeFileName(suggestedFilename);
   filename.replace_extension(extension);
   return outputDir / filename;

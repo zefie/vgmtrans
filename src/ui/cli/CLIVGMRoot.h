@@ -48,6 +48,8 @@ public:
 
   bool saveRMI(const VGMColl *coll);
 
+  bool usesSingleFileOutputPath() const;
+
   bool openRawFile(const std::filesystem::path &filename) override;
 
   bool init() override;
@@ -63,6 +65,7 @@ public:
 
   std::set<fs::path> inputFiles = {};
   fs::path outputDir = fs::path(".");
+  bool outputPathExplicitlySet = false;
   CLIExportMode exportMode = CLIExportMode::Default;
 };
 
