@@ -105,6 +105,7 @@ option(USE_SYSTEM_NLOHMANN "Use system-provided nlohmann_json library" OFF)
 option(USE_SYSTEM_UNARR "Use system-provided unarr library" OFF)
 option(USE_SYSTEM_LIBCHDR "Use system-provided libchdr library" OFF)
 option(USE_SYSTEM_MINIZIP "Use system-provided minizip library" OFF)
+option(USE_SYSTEM_NEOBAE "Use system-provided NeoBAE library" OFF)
 
 # ~~~
 # Source

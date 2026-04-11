@@ -5,6 +5,7 @@
  */
 
 #include <chrono>
+#include <array>
 #include <memory>
 #include <string>
 #include <set>
@@ -580,7 +581,8 @@ static bool collectRegionSampleBindings(const VGMColl &coll, std::vector<RegionS
   };
 
   for (auto *set : coll.instrSets()) {
-    for (auto *instr : set->aInstrs) {
+    const auto &instrs = set->exportInstrs();
+    for (auto *instr : instrs) {
       for (auto *rgn : instr->regions()) {
         VGMSampColl *samp_coll = rgn->sampCollPtr;
         if (samp_coll == nullptr) {
@@ -1247,19 +1249,29 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
     size_t count = 0;
     for (const auto *set : coll.instrSets()) {
       if (set != nullptr) {
-        count += set->aInstrs.size();
+        count += set->exportInstrs().size();
       }
     }
     return count;
   };
 
   const size_t instrument_count_before_presynth = count_collection_instruments();
-  coll.preSynthFileCreation();
+  for (auto *instr_set : coll.instrSets()) {
+    if (instr_set != nullptr) {
+      instr_set->prepareForExport(&coll);
+    }
+  }
   const bool has_materialized_temporary_instruments =
       count_collection_instruments() > instrument_count_before_presynth;
   const bool strict_authored_mode = has_materialized_temporary_instruments;
 
-  auto post_synth_guard = [&coll]() { coll.postSynthFileCreation(); };
+  auto post_synth_guard = [&coll]() {
+    for (auto *instr_set : coll.instrSets()) {
+      if (instr_set != nullptr) {
+        instr_set->cleanupAfterExport();
+      }
+    }
+  };
   struct ScopeGuard {
     decltype(post_synth_guard) &fn;
     ~ScopeGuard() { fn(); }
