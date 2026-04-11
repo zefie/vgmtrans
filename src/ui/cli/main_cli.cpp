@@ -8,6 +8,7 @@
 #include <iostream>
 
 #include "CLIVGMRoot.h"
+#include "Options.h"
 #include "VGMExport.h"
 
 using namespace std;
@@ -21,20 +22,34 @@ int main(int argc, char *argv[]) {
       return EXIT_SUCCESS;
     }
     else if (s == "--rmf") {
-      if (cliroot.exportMode == CLIExportMode::RMIOnly) {
-        cerr << "Error: --rmf and --rmi are mutually exclusive" << endl;
+      if (cliroot.exportMode == CLIExportMode::RMIOnly ||
+          cliroot.exportMode == CLIExportMode::ZMFOnly) {
+        cerr << "Error: --rmf, --zmf, and --rmi are mutually exclusive" << endl;
         cliroot.displayUsage();
         return EXIT_FAILURE;
       }
       cliroot.exportMode = CLIExportMode::RMFOnly;
+      ConversionOptions::the().setForceZmfExport(false);
+    }
+    else if (s == "--zmf") {
+      if (cliroot.exportMode == CLIExportMode::RMIOnly ||
+          cliroot.exportMode == CLIExportMode::RMFOnly) {
+        cerr << "Error: --rmf, --zmf, and --rmi are mutually exclusive" << endl;
+        cliroot.displayUsage();
+        return EXIT_FAILURE;
+      }
+      cliroot.exportMode = CLIExportMode::ZMFOnly;
+      ConversionOptions::the().setForceZmfExport(true);
     }
     else if (s == "--rmi") {
-      if (cliroot.exportMode == CLIExportMode::RMFOnly) {
-        cerr << "Error: --rmf and --rmi are mutually exclusive" << endl;
+      if (cliroot.exportMode == CLIExportMode::RMFOnly ||
+          cliroot.exportMode == CLIExportMode::ZMFOnly) {
+        cerr << "Error: --rmf, --zmf, and --rmi are mutually exclusive" << endl;
         cliroot.displayUsage();
         return EXIT_FAILURE;
       }
       cliroot.exportMode = CLIExportMode::RMIOnly;
+      ConversionOptions::the().setForceZmfExport(false);
     }
     else if (s == "-o") {
       if (i == argc - 1) {

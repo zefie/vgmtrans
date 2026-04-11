@@ -59,6 +59,9 @@ public:
   bool skipChannel10() const { return m_skip_channel_10; }
   void setSkipChannel10(bool should) { m_skip_channel_10 = should; }
 
+  bool forceZmfExport() const { return m_force_zmf_export; }
+  void setForceZmfExport(bool should) { m_force_zmf_export = should; }
+
   void load(OptionStore& store) {
     auto g = store.beginGroup("ConversionOptions");
     const int bs = store.getInt("bankSelectStyle", static_cast<int>(BankSelectStyle::GS));
@@ -66,6 +69,7 @@ public:
                                                                 : BankSelectStyle::GS;
     m_sequence_loops = std::clamp(store.getInt("sequenceLoops", 1), 0, kMaxSequenceLoops);
     m_skip_channel_10 = store.getBool("skipChannel10", true);
+    m_force_zmf_export = store.getBool("forceZmfExport", false);
   }
 
   void save(OptionStore& store) const {
@@ -73,6 +77,7 @@ public:
     store.setInt("bankSelectStyle", static_cast<int>(m_bs_style));
     store.setInt("sequenceLoops",   m_sequence_loops);
     store.setBool("skipChannel10", m_skip_channel_10);
+    store.setBool("forceZmfExport", m_force_zmf_export);
   }
 
 private:
@@ -81,4 +86,5 @@ private:
   BankSelectStyle m_bs_style{BankSelectStyle::GS};
   int m_sequence_loops{0};
   bool m_skip_channel_10{true};
+  bool m_force_zmf_export{false};
 };

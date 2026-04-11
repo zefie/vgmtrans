@@ -18,6 +18,7 @@
 #include "VGMSeq.h"
 #include "SF2Conversion.h"
 #include "DLSConversion.h"
+#include "Options.h"
 
 using namespace std;
 namespace fs = std::filesystem;
@@ -27,7 +28,7 @@ CLIVGMRoot cliroot;
 // displays a usage message
 void CLIVGMRoot::displayUsage() {
   cerr << "Usage: " << CLI_APP_NAME
-  << " [--rmf|--rmi] input_file1 input_file2 ... [-o output_path]" << endl;
+  << " [--rmf|--zmf|--rmi] input_file1 input_file2 ... [-o output_path]" << endl;
 }
 
 // displays a help message
@@ -35,8 +36,9 @@ void CLIVGMRoot::displayHelp() {
   cerr << "VGMTrans version " << VGMTRANS_VERSION << endl;
   cerr << "Converts music files used in console video games into industry-standard MIDI, DLS/SF2, and RMF files." << endl << endl;
   cerr << "  --rmf    Export only RMF output, automatically using ZMF when the document requires it" << endl;
+  cerr << "  --zmf    Export only ZMF output and enable extended ADSR authoring in SF2-to-HSB conversion" << endl;
   cerr << "  --rmi    Export only a RIFF MIDI file with an embedded DLS soundbank" << endl << endl;
-  cerr << "  With --rmf/--rmi and a single input, -o can be an output file path or an extensionless base name" << endl << endl;
+  cerr << "  With --rmf/--zmf/--rmi and a single input, -o can be an output file path or an extensionless base name" << endl << endl;
   displayUsage();
 }
 
@@ -55,7 +57,9 @@ bool CLIVGMRoot::makeOutputDir() {
 
 bool CLIVGMRoot::usesSingleFileOutputPath() const {
   return outputPathExplicitlySet && inputFiles.size() == 1 &&
-         (exportMode == CLIExportMode::RMFOnly || exportMode == CLIExportMode::RMIOnly);
+         (exportMode == CLIExportMode::RMFOnly ||
+          exportMode == CLIExportMode::ZMFOnly ||
+          exportMode == CLIExportMode::RMIOnly);
 }
 
 bool CLIVGMRoot::openRawFile(const fs::path& filename) {
@@ -189,6 +193,7 @@ bool CLIVGMRoot::exportCollection(VGMColl* coll) {
 
   switch (exportMode) {
     case CLIExportMode::RMFOnly:
+    case CLIExportMode::ZMFOnly:
       return saveRMF(coll);
     case CLIExportMode::RMIOnly:
       return saveRMI(coll);
@@ -257,7 +262,12 @@ bool CLIVGMRoot::saveRMF(VGMColl* coll) {
   bool success = conversion::saveAsRMF(*coll, filepath, &actual_filepath);
   if (success) {
     if (actual_filepath != filepath) {
-      cout << "\tCannot save as RMF, saving as ZMF (a loop is under 20 frames long)" << endl;
+      if (ConversionOptions::the().forceZmfExport()) {
+        cout << "\tSaving as ZMF (--zmf enabled)" << endl;
+      }
+      else {
+        cout << "\tCannot save as RMF, saving as ZMF (a loop is under 20 frames long)" << endl;
+      }
     }
     cout << "\t" << actual_filepath << endl;
   }

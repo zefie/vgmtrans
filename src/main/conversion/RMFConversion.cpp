@@ -330,6 +330,13 @@ static bool computeLoopFrames(const Loop &loop, const VGMSamp &sample, uint32_t 
     return false;
   }
 
+  // Guard: loopStart=0 and loopLength=0 with loopStatus=1 means the format flagged
+  // the sample as looping but provided no actual boundary data. Treat as no loop,
+  // consistent with SF2Conversion's (loopStart != 0 || loopLength != 0) check.
+  if (loop.loopStart == 0 && loop.loopLength == 0) {
+    return false;
+  }
+
   uint64_t loop_length = loop.loopLength;
   if (loop.loopStatus && loop_length == 0) {
     if (sample.dataLength <= loop.loopStart) {
@@ -1017,7 +1024,11 @@ static void applyProgramADSR(BAERmfEditorDocument *document,
     ext_info.flags1 = static_cast<unsigned char>(ext_info.flags1 | kZbfEnableInterpolate);
     ext_info.flags2 = static_cast<unsigned char>(ext_info.flags2 | kZbfUseSoundModifierAsRootKey);
     ext_info.flags2 = static_cast<unsigned char>(ext_info.flags2 & ~kZbfAdvancedInterpolation);
-    populateVolumeADSRFromRegion(*source.region, ext_info.volumeADSR);
+    const bool preserve_converted_adsr =
+        ConversionOptions::the().forceZmfExport() && get_result == BAE_NO_ERROR;
+    if (!preserve_converted_adsr) {
+      populateVolumeADSRFromRegion(*source.region, ext_info.volumeADSR);
+    }
     populateRegionLfos(*source.region, ext_info);
     BAERmfEditorDocument_SetInstrumentExtInfo(document, inst_id, &ext_info);
   }
@@ -2000,7 +2011,13 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
   }
 
   SF2HSBConvertOptions convert_options{};
-  convert_options.forceHsb = 1;
+  if (ConversionOptions::the().forceZmfExport()) {
+    convert_options.forceZsb = 1;
+    convert_options.extendedAdsr = 1;
+  }
+  else {
+    convert_options.forceHsb = 1;
+  }
   SF2HSBConvertReport convert_report{};
   char error_buffer[512]{};
   uint32_t bank_size = 0;
@@ -3151,10 +3168,11 @@ static bool requiresZmfOutput(const VGMColl &coll) {
 }
 
 static std::filesystem::path selectRmfOutputPath(bool requires_zmf,
+                                                 bool force_zmf,
                                                  const std::filesystem::path &preferred_path) {
   std::filesystem::path output_path = preferred_path;
   const bool prefer_zmf = preferred_path.extension() == ".zmf";
-  if (requires_zmf || prefer_zmf) {
+  if (force_zmf || requires_zmf || prefer_zmf) {
     output_path.replace_extension(".zmf");
   }
   else {
@@ -3218,7 +3236,8 @@ bool saveAsRMF(const VGMColl &coll,
 
   uint32_t zmf_reason = 0;
   const bool requires_zmf = BAERmfEditorDocument_RequiresZmf(document, &zmf_reason) != FALSE;
-  const std::filesystem::path resolved_output_path = selectRmfOutputPath(requires_zmf, filepath);
+  const bool force_zmf = ConversionOptions::the().forceZmfExport();
+  const std::filesystem::path resolved_output_path = selectRmfOutputPath(requires_zmf, force_zmf, filepath);
   if (actual_filepath != nullptr) {
     *actual_filepath = resolved_output_path;
   }

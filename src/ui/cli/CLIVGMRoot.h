@@ -17,6 +17,7 @@ namespace fs = std::filesystem;
 enum class CLIExportMode {
   Default,
   RMFOnly,
+  ZMFOnly,
   RMIOnly,
 };
 
