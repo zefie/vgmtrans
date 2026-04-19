@@ -6,6 +6,7 @@
 
 #include "EmptyStateWidget.h"
 
+#include <QBoxLayout>
 #include <QColor>
 #include <QBoxLayout>
 #include <QEvent>

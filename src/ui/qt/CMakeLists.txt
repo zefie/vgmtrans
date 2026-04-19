@@ -49,6 +49,7 @@ target_sources(vgmtrans
     services/MenuManager.cpp
     services/Settings.cpp
     services/NotificationCenter.cpp
+    services/commands/StitchCommands.cpp
     util/ColorHelpers.cpp
     util/Helpers.cpp
     util/InstructionHintLayout.cpp
@@ -58,6 +59,7 @@ target_sources(vgmtrans
     widgets/SeekBar.cpp
     widgets/MarqueeLabel.cpp
     widgets/SnappingSplitter.cpp
+    widgets/StitchUI.cpp
     widgets/StatusBarContent.cpp
     widgets/Toast.cpp
     widgets/ToastHost.cpp
@@ -97,6 +99,7 @@ target_sources(vgmtrans
       services/commands/Command.h
       services/commands/GeneralCommands.h
       services/commands/SaveCommands.h
+      services/commands/StitchCommands.h
       services/commands/VGMCollCommands.h
   PRIVATE
     FILE_SET headers_util TYPE HEADERS BASE_DIRS util
