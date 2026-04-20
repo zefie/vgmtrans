@@ -6,6 +6,8 @@
 
 #include "widgets/StitchUI.h"
 
+#include "ColorHelpers.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -230,9 +232,7 @@ void configureActionButton(QPushButton* button, const QString& text, const QStri
 
 class StitchDragHandleWidget final : public QWidget {
 public:
-  explicit StitchDragHandleWidget(QWidget* parent = nullptr) : QWidget(parent) {
-    setCursor(Qt::OpenHandCursor);
-  }
+  using QWidget::QWidget;
 
 protected:
   void mousePressEvent(QMouseEvent* event) override {
@@ -338,6 +338,16 @@ public:
     setObjectName(QStringLiteral("stitchExportBalloon"));
     setFrameShape(QFrame::NoFrame);
     setFrameShadow(QFrame::Plain);
+    const QColor borderColor = blendColors(
+      palette().color(QPalette::Window),
+      palette().color(QPalette::Text),
+      0.88);
+    setStyleSheet(QString(
+        "QFrame#stitchExportBalloon {"
+        "  background-color: palette(window);"
+        "  border: 1px solid %1;"
+        "}")
+        .arg(cssColor(borderColor)));
     setMinimumSize(kBalloonMinWidth, kBalloonMinHeight);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     setAttribute(Qt::WA_DeleteOnClose, false);
@@ -352,7 +362,7 @@ public:
     headingRow->setContentsMargins(0, 10, 0, 8);
     headingRow->setSpacing(4);
 
-    auto* heading = new QLabel(QStringLiteral("Stitch Queue"), m_headingDragHandle);
+    auto* heading = new QLabel(QStringLiteral("Collection Stitcher"), m_headingDragHandle);
     heading->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     QFont headingFont = heading->font();
     headingFont.setBold(true);
@@ -379,10 +389,10 @@ public:
 
     m_emptyState = new EmptyStateWidget(
         defaultEmptyStateHeadingHint(QStringLiteral(":/icons/stitch.svg"),
-                                     QStringLiteral("Drop collections to stitch")),
+                                     QStringLiteral("Drop collections here")),
         m_queueList, this);
     m_emptyState->setBodyText(
-        QStringLiteral("Drag from Collections, reorder, then export MIDI + SF2."));
+        QStringLiteral("Reorder, then export as joined MIDI + SF2"));
     rootLayout->addWidget(m_emptyState, 1);
 
     auto* actionRow = new QHBoxLayout();
@@ -594,8 +604,8 @@ private:
       button->setIcon(stencilSvgIcon(iconPath, iconColor));
     };
 
-    refreshButtonIcon(m_removeButton, QStringLiteral(":/icons/transfer-left.svg"));
-    refreshButtonIcon(m_clearButton, QStringLiteral(":/icons/clear.svg"));
+    refreshButtonIcon(m_removeButton, QStringLiteral(":/icons/minus-circle-outline.svg"));
+    refreshButtonIcon(m_clearButton, QStringLiteral(":/icons/close-circle.svg"));
     refreshButtonIcon(m_exportButton, QStringLiteral(":/icons/export.svg"));
     refreshStencilToolButton(m_closeButton, QStringLiteral(":/icons/toast_close.svg"), palette);
 
@@ -718,4 +728,3 @@ bool toggleCollectionStitchBalloon(const std::vector<VGMColl*>& initialCollectio
 }
 
 }  // namespace stitchui
-
