@@ -25,6 +25,7 @@
 #include "RMFConversion.h"
 #include "SF2Conversion.h"
 #include "SF2File.h"
+#include "SynthFile.h"
 #include "ScaleConversion.h"
 #include "VGMColl.h"
 #include "VGMInstrSet.h"
@@ -1998,11 +1999,15 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
     }
   }
 
-  auto sf2file = std::unique_ptr<SF2File>(createSF2File(coll.instrSets(), coll.sampColls(), nullptr));
-  if (!sf2file) {
+  // Build the SF2 directly from the current exportInstrs() without calling createSF2File,
+  // which would internally invoke prepareForExport(nullptr) → cleanupAfterExport and thereby
+  // delete any materialized temp instruments (and leave dangling region pointers in bindings).
+  auto synthfile = std::unique_ptr<SynthFile>(createSynthFile(coll.instrSets(), coll.sampColls()));
+  if (!synthfile) {
     L_ERROR("Failed to create temporary SF2 for RMF bank authoring");
     return false;
   }
+  auto sf2file = std::unique_ptr<SF2File>(new SF2File(synthfile.get()));
   const std::vector<uint8_t> sf2_buffer = sf2file->saveToMem();
   if (sf2_buffer.empty()) {
     L_ERROR("Failed to serialize temporary SF2 for RMF bank authoring");
@@ -2114,11 +2119,30 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
     }
 
     const auto fallback = fallback_index_by_program.find(source_program);
-    if (fallback == fallback_index_by_program.end() || strict_authored_mode) {
+    if (fallback == fallback_index_by_program.end()) {
       L_ERROR("Temporary Beatnik bank is missing bank {} program {} required for RMF export",
               static_cast<unsigned>(authored_key.first),
               static_cast<unsigned>(source_program));
       return false;
+    }
+
+    if (strict_authored_mode) {
+      const auto authored_keys_for_program = authored_keys_by_program.find(source_program);
+      const bool has_unique_authored_program =
+          authored_keys_for_program != authored_keys_by_program.end() &&
+          authored_keys_for_program->second.size() == 1;
+      if (!has_unique_authored_program) {
+        L_ERROR("Temporary Beatnik bank is missing bank {} program {} required for RMF export",
+                static_cast<unsigned>(authored_key.first),
+                static_cast<unsigned>(source_program));
+        return false;
+      }
+
+      L_WARN("Temporary Beatnik bank is missing bank {} program {}; strict mode using unique program-only fallback",
+             static_cast<unsigned>(authored_key.first),
+             static_cast<unsigned>(source_program));
+      instrument_index_by_authored[authored_key] = fallback->second;
+      continue;
     }
 
     L_WARN("Temporary Beatnik bank is missing bank {} program {}; falling back to program-only match for RMF export",
@@ -3227,7 +3251,7 @@ bool saveAsRMF(const VGMColl &coll,
     return false;
   }
 
-  BAERmfEditorDocument_SetMidiStorageType(document, BAE_EDITOR_MIDI_STORAGE_ECMI);
+  BAERmfEditorDocument_SetMidiStorageType(document, BAE_EDITOR_MIDI_STORAGE_CMID_BEST_EFFORT);
 
   if (!coll.name().empty()) {
     BAERmfEditorDocument_SetInfo(document, TITLE_INFO, coll.name().c_str());
