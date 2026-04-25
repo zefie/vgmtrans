@@ -514,6 +514,13 @@ int HexView::getViewportWidthSansAsciiAndAddress() const {
   return getVirtualWidthSansAsciiAndAddress() + VIEWPORT_PADDING;
 }
 
+std::vector<SplitterSnapRange> HexView::splitterSnapRanges() const {
+  return {
+      {getViewportWidthSansAsciiAndAddress(), getViewportWidthSansAscii()},
+      {getViewportWidthSansAscii(), getViewportFullWidth()},
+  };
+}
+
 // Sync vertical scrollbar range/steps with current content and viewport dimensions.
 void HexView::updateScrollBars() {
   const int totalHeight = getVirtualHeight();
@@ -611,6 +618,98 @@ void HexView::setSelectedItem(VGMItem* item) {
 
   selectCurrentItem(true);
 
+  if (!m_lineHeight) {
+    return;
+  }
+
+  const int itemBaseOffset = static_cast<int>(m_selectedItem->offset() - m_vgmfile->offset());
+  const int line = itemBaseOffset / BYTES_PER_LINE;
+  const int endLine = (itemBaseOffset + static_cast<int>(m_selectedItem->length())) / BYTES_PER_LINE;
+
+  const int viewStartLine = verticalScrollBar()->value() / m_lineHeight;
+  const int viewEndLine = viewStartLine + (viewport()->height() / m_lineHeight);
+
+  if (line <= viewEndLine && endLine > viewStartLine) {
+    return;
+  }
+
+  if (line < viewStartLine) {
+    verticalScrollBar()->setValue(line * m_lineHeight);
+  } else if (endLine > viewEndLine) {
+    if ((endLine - line) > (viewport()->height() / m_lineHeight)) {
+      verticalScrollBar()->setValue(line * m_lineHeight);
+    } else {
+      const int y = ((endLine + 1) * m_lineHeight) + 1 - viewport()->height();
+      verticalScrollBar()->setValue(y);
+    }
+  }
+}
+
+// Select multiple items, using the primary item as the anchor for keyboard focus and scroll-to-visible behavior.
+void HexView::setSelectedItems(const std::vector<const VGMItem*>& items,
+                               const VGMItem* primaryItem) {
+  if (items.empty()) {
+    setSelectedItem(nullptr);
+    return;
+  }
+
+  // If the caller did not provide an explicit primary item, fall back to the first non-null entry so we still have
+  // a stable anchor for the selection.
+  VGMItem* resolvedPrimary = const_cast<VGMItem*>(primaryItem);
+  if (!resolvedPrimary) {
+    for (const auto* item : items) {
+      if (item) {
+        resolvedPrimary = const_cast<VGMItem*>(item);
+        break;
+      }
+    }
+  }
+
+  if (!resolvedPrimary) {
+    setSelectedItem(nullptr);
+    return;
+  }
+
+  m_selectedItem = resolvedPrimary;
+  m_selectedOffset = m_selectedItem->offset();
+
+  std::vector<SelectionRange> selections;
+  selections.reserve(items.size());
+  std::unordered_set<uint64_t> keys;
+  keys.reserve(items.size() * 2 + 1);
+
+  for (const auto* item : items) {
+    if (!item) {
+      continue;
+    }
+    // Zero-length items still need a visible caret-width highlight in the hex view, so normalize them to a one-byte range.
+    const uint32_t length = item->length() > 0 ? item->length() : 1u;
+    const SelectionRange range{item->offset(), length};
+    // Ignore duplicate ranges so the renderer and highlight animation only see one entry per distinct byte span.
+    if (keys.insert(selectionKey(range)).second) {
+      selections.push_back(range);
+    }
+  }
+
+  if (selections.empty()) {
+    setSelectedItem(nullptr);
+    return;
+  }
+
+  // Keep the stored ranges ordered for deterministic rendering and hit-testing.
+  std::sort(selections.begin(), selections.end(), [](const SelectionRange& a, const SelectionRange& b) {
+    if (a.offset != b.offset) {
+      return a.offset < b.offset;
+    }
+    return a.length < b.length;
+  });
+
+  m_selections = std::move(selections);
+  m_fadeSelections.clear();
+  updateHighlightState(true);
+  requestRhiUpdate(false, true);
+
+  // Reuse the single-item visibility logic and anchor it to the primary item.
   if (!m_lineHeight) {
     return;
   }
