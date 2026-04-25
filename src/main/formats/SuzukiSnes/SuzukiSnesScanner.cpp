@@ -219,7 +219,8 @@ void SuzukiSnesScanner::searchForSuzukiSnesFromARAM(RawFile *file) {
   }
 
   SuzukiSnesInstrSet *newInstrSet =
-      new SuzukiSnesInstrSet(file, version, spcDirAddr, addrSRCNTable, addrVolumeTable, addrADSRTable, addrTuningTable);
+      new SuzukiSnesInstrSet(file, version, spcDirAddr, addrSRCNTable, addrVolumeTable,
+                             addrADSRTable, addrTuningTable);
   if (!newInstrSet->loadVGMFile()) {
     delete newInstrSet;
     return;

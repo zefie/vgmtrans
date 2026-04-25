@@ -7,6 +7,7 @@ class VGMInstr;
 class VGMRgn;
 class VGMSamp;
 class VGMRgnItem;
+class VGMColl;
 
 constexpr float defaultReverbPercent = 0.25;
 
@@ -25,7 +26,14 @@ public:
   virtual bool parseHeader();
   virtual bool parseInstrPointers();
   virtual bool loadInstrs();
+  virtual void useColl(const VGMColl* coll) {}
+  virtual void unuseColl() {}
   virtual bool isViableSampCollMatch(VGMSampColl*) { return true; }
+
+  void prepareForExport(const VGMColl* coll);
+  void cleanupAfterExport();
+
+  const std::vector<VGMInstr*>& exportInstrs() const;
 
   VGMInstr *addInstr(uint32_t offset, uint32_t length, uint32_t bank, uint32_t instrNum,
                      const std::string &instrName = "");
@@ -34,10 +42,13 @@ public:
   VGMSampColl *sampColl;
 
 protected:
+   void addTempInstr(VGMInstr* instr);
    void disableAutoAddInstrumentsAsChildren() { m_auto_add_instruments_as_children = false; }
 
 private:
    bool m_auto_add_instruments_as_children{true};
+   std::vector<VGMInstr*> m_exportInstrs;
+   std::vector<VGMInstr*> m_tempInstrs;
 };
 
 // ********

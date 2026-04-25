@@ -11,11 +11,11 @@
 #if defined(Q_OS_LINUX) && QT_CONFIG(opengl)
 #include <QRhiWidget>
 #endif
-#include <QStyleFactory>
 #include <QTimer>
 #include <filesystem>
 #include "MainWindow.h"
 #include "QtVGMRoot.h"
+#include "widgets/Windows11ProxyStyle.h"
 
 class VGMTransApplication final : public QApplication {
 public:
@@ -44,6 +44,14 @@ int main(int argc, char *argv[]) {
   VGMTransApplication app(argc, argv);
 
 #ifdef Q_OS_WIN
+  if (QStyle *style = app.style();
+      style && (style->inherits("QWindows11Style") ||
+                style->name().compare(QStringLiteral("windows11"), Qt::CaseInsensitive) == 0)) {
+    app.setStyle(new Windows11ProxyStyle(style->name()));
+  } else {
+    app.setStyle(new Windows11ProxyStyle("fusion"));
+  }
+
   QFont font = app.font();
   if (font.pointSizeF() > 0.0) {
     font.setPointSizeF(font.pointSizeF() + 1.0);

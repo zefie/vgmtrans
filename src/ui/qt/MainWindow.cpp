@@ -8,13 +8,25 @@
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
-#include <QMimeData>
-#include <QFileInfo>
 #include <QFileDialog>
-#include <QStandardPaths>
+#include <QFont>
+#include <QAction>
 #include <QDockWidget>
-#include <QGridLayout>
+#include <QApplication>
+#include <QCloseEvent>
+#include <QFileInfo>
+#include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QMimeData>
+#include <QMouseEvent>
+#include <QResizeEvent>
+#include <QShortcut>
+#include <QStandardPaths>
+#include <QStatusBar>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #if defined(Q_OS_LINUX)
 #include <QDBusConnection>
@@ -22,25 +34,24 @@
 #include <QDBusReply>
 #include <QVariantMap>
 #endif
-#include <QShortcut>
-#include <QMessageBox>
-#include <QStatusBar>
-#include <QResizeEvent>
-#include <QApplication>
-#include <QKeyEvent>
 #include <filesystem>
 #include <version.h>
 #include <QWKWidgets/widgetwindowagent.h>
-#include "ManualCollectionDialog.h"
 #include "MainWindow.h"
+#include "MainWindowDockLayout.h"
 #include "QtVGMRoot.h"
 #include "MenuBar.h"
 #include "PlaybackControls.h"
 #include "About.h"
 #include "Logger.h"
+#include "ManualCollectionDialog.h"
 #include "SequencePlayer.h"
+#include "services/commands/StitchCommands.h"
+#include "widgets/StitchUI.h"
 #include "services/NotificationCenter.h"
 #include "services/Settings.h"
+#include "util/ColorHelpers.h"
+#include "util/UIHelpers.h"
 #include "workarea/RawFileListView.h"
 #include "workarea/VGMFileListView.h"
 #include "workarea/VGMCollListView.h"
@@ -55,6 +66,42 @@
 
 namespace {
 constexpr auto MIME_PORTAL_FILETRANSFER = "application/vnd.portal.filetransfer";
+constexpr int kCollectionTitleControlSpacing = 20;
+
+bool isDockSeparatorCursor(Qt::CursorShape shape) {
+  return shape == Qt::SplitHCursor || shape == Qt::SplitVCursor;
+}
+
+bool hasPortalFileTransferMime(const QMimeData* mimeData) {
+  if (!mimeData) {
+    return false;
+  }
+
+  for (const QString& format : mimeData->formats()) {
+    if (format == MIME_PORTAL_FILETRANSFER || format.startsWith(MIME_PORTAL_FILETRANSFER)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasLocalFileUrls(const QMimeData* mimeData) {
+  if (!mimeData || !mimeData->hasUrls()) {
+    return false;
+  }
+
+  const QList<QUrl> urls = mimeData->urls();
+  for (const QUrl& url : urls) {
+    if (url.isLocalFile()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isFileDropMime(const QMimeData* mimeData) {
+  return hasPortalFileTransferMime(mimeData) || hasLocalFileUrls(mimeData);
+}
 
 QStringList retrievePortalDroppedFiles([[maybe_unused]] const QMimeData* mimeData) {
 #if defined(VGMTRANS_HAVE_DBUS) && defined(Q_OS_LINUX)
@@ -116,6 +163,16 @@ MainWindow::MainWindow() : QMainWindow(nullptr) {
   m_windowAgent->setup(this);
 
   createElements();
+  m_dockLayout = new MainWindowDockLayout(this,
+                                          {
+                                              .rawFiles = m_rawfile_dock,
+                                              .vgmFiles = m_vgmfile_dock,
+                                              .collections = m_coll_dock,
+                                              .collectionContents = m_coll_view_dock,
+                                              .logs = m_logger,
+                                              .collectionListView = m_coll_listview,
+                                          });
+  m_dockLayout->restoreWindowGeometry();
   configureWindowAgent();
   routeSignals();
   qApp->installEventFilter(this);
@@ -141,8 +198,11 @@ MainWindow::MainWindow() : QMainWindow(nullptr) {
 void MainWindow::createElements() {
   setDocumentMode(true);
   setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);
+  setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
+  setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+  setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
 
-  const auto installTitleBar = [this](QDockWidget *dock, const QString& title,
+  const auto installTitleBar = [](QDockWidget *dock, const QString& title,
                                       TitleBar::Buttons buttons,
                                       const QString& newToolTip = QString()) {
     auto *titleBar = new TitleBar(title, buttons, dock, newToolTip);
@@ -151,41 +211,38 @@ void MainWindow::createElements() {
     return titleBar;
   };
 
-  m_rawfile_dock = new QDockWidget("Raw files");
+  m_rawfile_dock = new QDockWidget("Scanned Files");
+  m_rawfile_dock->setObjectName(QStringLiteral("rawFileListDock"));
+  m_rawfile_dock->setAllowedAreas(Qt::LeftDockWidgetArea);
   m_rawfile_dock->setWidget(new RawFileListView());
   m_rawfile_dock->setContentsMargins(0, 0, 0, 0);
   installTitleBar(m_rawfile_dock, "Scanned Files", TitleBar::HideButton);
 
-  m_vgmfile_dock = new QDockWidget("Detected Music Files");
-  m_vgmfile_dock->setWidget(new VGMFileListView());
+  m_vgmfile_dock = new QDockWidget("Detected Files");
+  m_vgmfile_dock->setObjectName(QStringLiteral("vgmFileListDock"));
+  m_vgmfile_dock->setAllowedAreas(Qt::LeftDockWidgetArea);
+  auto* vgmfileListView = new VGMFileListView();
+  vgmfileListView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  m_vgmfile_dock->setWidget(vgmfileListView);
   m_vgmfile_dock->setContentsMargins(0, 0, 0, 0);
-  installTitleBar(m_vgmfile_dock, "Detected Music Files", TitleBar::HideButton);
-
-
-  addDockWidget(Qt::LeftDockWidgetArea, m_rawfile_dock);
-  splitDockWidget(m_rawfile_dock, m_vgmfile_dock, Qt::Orientation::Vertical);
-  m_vgmfile_dock->setFocus();
-
-  setCentralWidget(MdiArea::the());
+  installTitleBar(m_vgmfile_dock, "Detected Files", TitleBar::HideButton);
 
   m_coll_listview = new VGMCollListView();
   m_coll_view = new VGMCollView();
   m_playback_controls = new PlaybackControls();
 
-  auto coll_list_area = new QWidget();
-  auto coll_list_area_layout = new QVBoxLayout();
-  coll_list_area_layout->setContentsMargins(0, 0, 0, 0);
-  coll_list_area_layout->addWidget(m_coll_listview);
-  coll_list_area->setLayout(coll_list_area_layout);
-
-  auto coll_wrapper = new QWidget();
-  auto coll_layout = new QGridLayout();
-  coll_layout->addWidget(m_coll_view, 0, 0, 1, 1, Qt::AlignLeft);
-  coll_layout->addWidget(coll_list_area, 0, 1, -1, -1);
-  coll_wrapper->setLayout(coll_layout);
+  auto *central_wrapper = new QWidget(this);
+  auto *central_layout = new QVBoxLayout();
+  central_layout->setContentsMargins(0, 0, 0, 0);
+  central_layout->setSpacing(0);
+  central_layout->addWidget(MdiArea::the(), 1);
+  central_wrapper->setLayout(central_layout);
+  setCentralWidget(central_wrapper);
 
   m_coll_dock = new QDockWidget("Collections");
-  m_coll_dock->setWidget(coll_wrapper);
+  m_coll_dock->setObjectName(QStringLiteral("collectionListDock"));
+  m_coll_dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::BottomDockWidgetArea);
+  m_coll_dock->setWidget(m_coll_listview);
   m_coll_dock->setContentsMargins(0, 0, 0, 0);
   addDockWidget(Qt::BottomDockWidgetArea, m_coll_dock);
   TitleBar *collTitleBar = installTitleBar(
@@ -196,23 +253,100 @@ void MainWindow::createElements() {
     dialog.exec();
   });
 
+  auto* collLeadingControls = new QWidget(collTitleBar);
+  auto* collLeadingLayout = new QHBoxLayout(collLeadingControls);
+  collLeadingLayout->setContentsMargins(0, 0, 0, 0);
+  collLeadingLayout->setSpacing(kCollectionTitleControlSpacing);
+
+  m_stitchButton = new QToolButton(collLeadingControls);
+  configureToolButton(m_stitchButton, QStringLiteral("Stitch collections"),
+                      QSize(22, 20), QSize(16, 16));
+  m_stitchButton->setCheckable(true);
+  m_stitchButton->setChecked(false);
+
+  auto* collSearchEdit = new QLineEdit(collLeadingControls);
+  collSearchEdit->setPlaceholderText(QStringLiteral("Search"));
+  collSearchEdit->setClearButtonEnabled(true);
+  collSearchEdit->setFixedWidth(180);
+  collSearchEdit->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  QFont collSearchFont = collSearchEdit->font();
+  collSearchFont.setPointSizeF(collSearchFont.pointSizeF() - 1.0);
+  collSearchEdit->setFont(collSearchFont);
+#ifdef Q_OS_MAC
+  collSearchEdit->setAttribute(Qt::WA_MacShowFocusRect, false);
+#endif
+  const int searchControlHeight = m_stitchButton->height();
+  collSearchEdit->setFixedHeight(searchControlHeight);
+  QAction* collSearchIconAction =
+      collSearchEdit->addAction(QIcon(), QLineEdit::LeadingPosition);
+
+  collLeadingLayout->addWidget(m_stitchButton);
+  collLeadingLayout->addWidget(collSearchEdit);
+  collTitleBar->addLeadingWidget(collLeadingControls);
+
+  const auto refreshCollectionTitleControls =
+      [collTitleBar, this, collSearchEdit, collSearchIconAction]() {
+    const QPalette titleBarPalette = collTitleBar->palette();
+    const QColor titleBarBackground = titleBarPalette.color(QPalette::Window);
+    const QColor borderColor = blendColors(titleBarPalette.color(QPalette::Text), titleBarBackground, 0.08);
+    const QColor focusBorderColor = blendColors(titleBarPalette.color(QPalette::Highlight), titleBarBackground, 0.84);
+    const QColor focusBackground = blendColors(titleBarBackground, titleBarPalette.color(QPalette::Text), 0.96);
+    collSearchEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  border-radius: 5px;"
+        "  padding: 0px 6px 0px 0px;"
+        "}"
+        "QLineEdit:focus {"
+        "  border: 2px solid %3;"
+        "  background-color: %4;"
+        "}")
+                                      .arg(cssColor(titleBarBackground))
+                                      .arg(cssColor(borderColor))
+                                      .arg(cssColor(focusBorderColor))
+                                      .arg(cssColor(focusBackground)));
+    refreshStencilToolButton(m_stitchButton, QStringLiteral(":/icons/stitch.svg"),
+                             titleBarPalette, true);
+    collSearchIconAction->setIcon(stencilSvgIcon(QStringLiteral(":/icons/magnify.svg"),
+                                                 toolBarButtonIconColor(titleBarPalette)));
+  };
+  refreshCollectionTitleControls();
+  connect(collTitleBar, &TitleBar::appearanceChanged, this, refreshCollectionTitleControls);
+  connect(collSearchEdit, &QLineEdit::textChanged, m_coll_listview, &VGMCollListView::setFilterText);
+  connect(m_stitchButton, &QToolButton::clicked, this, [this]() {
+    const bool isOpen = stitchui::toggleCollectionStitchBalloon(
+        m_coll_listview->selectedCollections(), this, m_stitchButton, m_stitchButton);
+    m_stitchButton->setChecked(isOpen);
+  });
+
+  m_coll_view_dock = new QDockWidget("Collection Contents");
+  m_coll_view_dock->setObjectName(QStringLiteral("collectionContentDock"));
+  m_coll_view_dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::BottomDockWidgetArea);
+  m_coll_view_dock->setWidget(m_coll_view);
+  m_coll_view_dock->setContentsMargins(0, 0, 0, 0);
+  installTitleBar(m_coll_view_dock, "Collection Contents", TitleBar::HideButton);
+
+  addDockWidget(Qt::LeftDockWidgetArea, m_rawfile_dock);
+  splitDockWidget(m_rawfile_dock, m_vgmfile_dock, Qt::Orientation::Vertical);
+  m_vgmfile_dock->setFocus();
+
   m_logger = new Logger();
+  m_logger->setObjectName(QStringLiteral("loggerDock"));
   m_logger->setWindowTitle("Logs");
+  m_logger->setAllowedAreas(Qt::BottomDockWidgetArea);
   m_logger->setContentsMargins(0, 0, 0, 0);
-  addDockWidget(Qt::BottomDockWidgetArea, m_logger);
   TitleBar *loggerTitleBar = installTitleBar(m_logger, "Logs", TitleBar::HideButton);
   m_logger->installTitleBarControls(loggerTitleBar);
 
-  tabifyDockWidget(m_logger, m_coll_dock);
-  m_coll_dock->setFocus();
+  addDockWidget(Qt::BottomDockWidgetArea, m_coll_view_dock);
+  // Keep the bottom docks in a side-by-side layout so each dock preserves its own width.
+  splitDockWidget(m_coll_view_dock, m_coll_dock, Qt::Horizontal);
+  splitDockWidget(m_coll_dock, m_logger, Qt::Horizontal);
 
   const QList<QDockWidget *> viewMenuDocks{
-      m_vgmfile_dock,
-      m_coll_dock,
-      m_rawfile_dock,
-      m_logger,
+      m_vgmfile_dock, m_coll_dock, m_coll_view_dock, m_rawfile_dock, m_logger,
   };
-
   m_windowBar = new WindowBar(this);
 
 #if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
@@ -228,11 +362,12 @@ void MainWindow::createElements() {
   m_windowBar->setDockToggleButtons({
       {m_vgmfile_dock->toggleViewAction(), QStringLiteral(":/icons/music-box-outline.svg")},
       {m_coll_dock->toggleViewAction(), QStringLiteral(":/icons/music-box-multiple-outline.svg")},
+      {m_coll_view_dock->toggleViewAction(), QStringLiteral(":/icons/package-variant.svg")},
       {m_rawfile_dock->toggleViewAction(), QStringLiteral(":/icons/file-search-outline.svg")},
       {m_logger->toggleViewAction(), QStringLiteral(":/icons/book-open-variant-outline.svg")},
   });
   createStatusBar();
-  m_toastHost = new ToastHost(this);
+  m_toastHost = new ToastHost(this, MdiArea::the(), ToastHost::defaultMode());
 }
 
 void MainWindow::configureWindowAgent() {
@@ -269,21 +404,14 @@ void MainWindow::createStatusBar() {
 
 void MainWindow::showEvent(QShowEvent* event) {
   QMainWindow::showEvent(event);
-
-  // Set the initial heights of the docks in relation to the main window height
-  QList<int> sizes;
-  int totalHeight = this->height();
-  // Calculate the desired heights for the dock widgets
-  sizes << totalHeight * 3 / 10;   // Raw Files
-  sizes << totalHeight * 7 / 10;   // VGM Files
-  sizes << totalHeight / 4;        // Collections
-
-  resizeDocks({m_rawfile_dock, m_vgmfile_dock, m_coll_dock}, sizes, Qt::Vertical);
+  m_dockLayout->initializeAfterFirstShow();
 
   updateDragOverlayGeometry();
 
 #if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
   QTimer::singleShot(0, this, [this]() {
+    // QMainWindow repositions the menu widget during startup, so rebind the
+    // traffic-light anchor once after show to pick up the final rect.
     m_windowAgent->setSystemButtonArea(nullptr);
     m_windowAgent->setSystemButtonArea(m_windowBar->systemButtonArea());
   });
@@ -298,6 +426,7 @@ void MainWindow::routeSignals() {
     About about(this);
     about.exec();
   });
+  connect(m_menu_bar, &MenuBar::resetDockLayout, m_dockLayout, &MainWindowDockLayout::resetToDefault);
 
   connect(m_playback_controls, &PlaybackControls::playToggle, m_coll_listview,
           &VGMCollListView::handlePlaybackRequest);
@@ -305,8 +434,7 @@ void MainWindow::routeSignals() {
           &PlaybackControls::showPlayInfo);
   connect(m_playback_controls, &PlaybackControls::stopPressed, m_coll_listview,
           &VGMCollListView::handleStopRequest);
-  connect(m_playback_controls, &PlaybackControls::seekingTo, &SequencePlayer::the(),
-          &SequencePlayer::seek);
+  connect(m_playback_controls, &PlaybackControls::seekingTo, &SequencePlayer::the(), &SequencePlayer::seek);
   connect(&qtVGMRoot, &QtVGMRoot::UI_toastRequested, this, &MainWindow::showToast);
 
   auto *playShortcut = new QShortcut(QKeySequence(Qt::Key_Space), this);
@@ -315,7 +443,22 @@ void MainWindow::routeSignals() {
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
-  Q_UNUSED(obj);
+  if (event->type() == QEvent::MouseButtonPress) {
+    auto *mouseEvent = static_cast<QMouseEvent *>(event);
+    auto *widget = qobject_cast<QWidget *>(obj);
+    if (mouseEvent->button() == Qt::LeftButton && widget && (widget == this || isAncestorOf(widget)) &&
+        isDockSeparatorCursor(cursor().shape())) {
+      m_dockLayout->beginSeparatorDrag();
+    }
+  } else if (event->type() == QEvent::MouseMove) {
+    m_dockLayout->handleSeparatorMouseMove();
+  } else if (event->type() == QEvent::MouseButtonRelease) {
+    auto *mouseEvent = static_cast<QMouseEvent *>(event);
+    if (mouseEvent->button() == Qt::LeftButton) {
+      m_dockLayout->endSeparatorDrag();
+    }
+  }
+
   if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
     auto* keyEvent = static_cast<QKeyEvent*>(event);
     if (!keyEvent->isAutoRepeat() && keyEvent->key() == HexViewInput::kModifierKey) {
@@ -323,17 +466,36 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
       NotificationCenter::the()->setSeekModifierActive(active);
     }
   } else if (event->type() == QEvent::ApplicationDeactivate) {
+    m_dockLayout->cancelInteraction();
     NotificationCenter::the()->setSeekModifierActive(false);
   }
   return QMainWindow::eventFilter(obj, event);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event) {
+  if (!event) {
+    return;
+  }
+
+  if (!isFileDropMime(event->mimeData())) {
+    event->ignore();
+    hideDragOverlay();
+    return;
+  }
   event->acceptProposedAction();
   showDragOverlay();
 }
 
 void MainWindow::dragMoveEvent(QDragMoveEvent *event) {
+  if (!event) {
+    return;
+  }
+
+  if (!isFileDropMime(event->mimeData())) {
+    event->ignore();
+    hideDragOverlay();
+    return;
+  }
   event->acceptProposedAction();
   showDragOverlay();
 }
@@ -345,6 +507,14 @@ void MainWindow::dragLeaveEvent(QDragLeaveEvent *event) {
 
 void MainWindow::dropEvent(QDropEvent *event) {
   hideDragOverlay();
+  if (!event) {
+    return;
+  }
+
+  if (!isFileDropMime(event->mimeData())) {
+    event->ignore();
+    return;
+  }
 
   const QMimeData* mimeData = event->mimeData();
   const QStringList portalFiles = retrievePortalDroppedFiles(mimeData);
@@ -360,6 +530,11 @@ void MainWindow::dropEvent(QDropEvent *event) {
 
   handleDroppedUrls(mimeData->urls());
   event->acceptProposedAction();
+}
+
+void MainWindow::closeEvent(QCloseEvent *event) {
+  m_dockLayout->saveOnClose();
+  QMainWindow::closeEvent(event);
 }
 
 void MainWindow::showDragOverlay() {
@@ -443,6 +618,7 @@ void MainWindow::showToast(const QString& message, ToastType type, int duration_
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
   updateDragOverlayGeometry();
+  m_dockLayout->handleResize(event->oldSize(), event->size());
 }
 
 void MainWindow::updateDragOverlayAppearance() {

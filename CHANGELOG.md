@@ -7,13 +7,21 @@
 
 - Added an in-app dialog to help with reporting bugs.
 - Added Flatpak builds for Linux. From now on, stable releases will be automatically available on Flathub.
+- Added stitched export for collection chunks: drag collections into a stitch queue, reorder them, and export as a merged MIDI + SF2.
+- Added a search field to the Collections panel
+- Added Drum Kit support to the standard N-SPC driver (Nintendo's SNES SDK driver).
+- Added Drum Kit support to the SuzukiSnes driver (Seiken Densetsu 3, Super Mario RPG, etc)
+- Added Drum Kit support to the KonamiSnes driver.
+- Improved support for late-era Intelligent Systems SNES/SFC titles (Tetris Attack, Fire Emblem 4, Super Famicom Wars) 
 
 ### Changed
 
 - The analysis (HexView) panel was fully rewritten and now uses GPU rendering. Sequence items in the hexview are highlighted as playback progresses. Alt-click on items to seek playback to them.
+- The dock layout and window chrome have been redesigned. Dock layout now persists between app runs and can be reset via a new menu action.
 - Improved accuracy of Nintendo DS (SDAT) instrument ADSR.
 - Improved Wayland support (drag and drop, sandbox).
 - The space-bar hotkey to toggle playback no longer requires clicking on a collection first.
+- Improved detection of N-SPC driver instrument data.
 
 ### Fixed
 
@@ -24,3 +32,4 @@
 - Fixed an issues where samples from Nintendo DS (SDAT) data were being read with the wrong sample rate,
   resulting in instruments playing at the wrong pitch or seemingly be absent.
 - Fixed various memory leaks, most notably one which occurred on collection playback.
+- Fixed loading of older SPC files that do not have ID666 tags.

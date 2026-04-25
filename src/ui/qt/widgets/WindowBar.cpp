@@ -14,6 +14,7 @@
 #include <QShowEvent>
 #include <QStyle>
 #include <QToolButton>
+#include "ColorHelpers.h"
 #include "UIHelpers.h"
 
 namespace {
@@ -199,11 +200,9 @@ void WindowBar::setMenuBarWidget(QWidget *widget) {
     widget->setStyleSheet(QStringLiteral(
         "QMenuBar { background: transparent; border: none; }"
         "QMenuBar::item { padding: 3px 8px; margin: 0px; background: transparent; }"
-        "QMenuBar::item:selected { background: palette(highlight); color: palette(highlighted-text); }"
-        "QMenuBar::item:pressed { background: palette(highlight); color: palette(highlighted-text); }"
-        "QMenu { padding: 4px 0px; }"
-        "QMenu::item { padding: 6px 12px; margin: 1px 4px; }"
-        "QMenu::item:selected { background: palette(highlight); color: palette(highlighted-text); }"));
+        "QMenuBar::item:selected { background: palette(alternate-base); border-radius: 8px; }"
+        "QMenuBar::item:pressed { background: palette(alternate-base); }"
+        "QMenu { padding: 8px 0px; }"));
 #else
     widget->setStyleSheet(QStringLiteral("QMenuBar { background: transparent; border: none; }"));
 #endif

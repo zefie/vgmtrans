@@ -5,7 +5,9 @@
 */
 
 #include "UIHelpers.h"
+#include "ColorHelpers.h"
 #include "TintableSvgIconEngine.h"
+
 #include <QIcon>
 #include <QWidget>
 #include <QScrollArea>
@@ -18,6 +20,7 @@
 #include <QFileDialog>
 #include <QStandardPaths>
 #include <QApplication>
+#include <QPixmap>
 
 QScrollArea* getContainingScrollArea(const QWidget* widget) {
   QWidget* viewport = widget->parentWidget();
@@ -82,26 +85,6 @@ QPixmap tintedIconPixmap(const QIcon &icon, const QSize &size, const QColor &col
   painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
   painter.fillRect(pixmap.rect(), color);
   return pixmap;
-}
-
-QString cssColor(const QColor &color) {
-  return QStringLiteral("rgba(%1, %2, %3, %4)")
-      .arg(color.red())
-      .arg(color.green())
-      .arg(color.blue())
-      .arg(color.alpha());
-}
-
-QColor blendColors(const QColor &foreground, const QColor &background, qreal foregroundWeight) {
-  const qreal backgroundWeight = 1.0 - foregroundWeight;
-  return QColor::fromRgbF(foreground.redF() * foregroundWeight + background.redF() * backgroundWeight,
-                          foreground.greenF() * foregroundWeight + background.greenF() * backgroundWeight,
-                          foreground.blueF() * foregroundWeight + background.blueF() * backgroundWeight,
-                          foreground.alphaF() * foregroundWeight + background.alphaF() * backgroundWeight);
-}
-
-bool isDarkPalette(const QPalette &palette) {
-  return palette.color(QPalette::Window).lightnessF() < 0.5;
 }
 
 void configureToolButton(QToolButton *button, const QString &toolTip, const QSize &buttonSize,

@@ -39,6 +39,7 @@ target_sources(vgmtrans
     PlaybackControls.cpp
     Logger.cpp
     MainWindow.cpp
+    MainWindowDockLayout.cpp
     ManualCollectionDialog.cpp
     MenuBar.cpp
     QtVGMRoot.cpp
@@ -48,17 +49,23 @@ target_sources(vgmtrans
     services/MenuManager.cpp
     services/Settings.cpp
     services/NotificationCenter.cpp
+    services/commands/StitchCommands.cpp
+    util/ColorHelpers.cpp
     util/Helpers.cpp
+    util/InstructionHintLayout.cpp
     util/UIHelpers.cpp
     widgets/ItemViewDensity.cpp
+    widgets/EmptyStateWidget.cpp
     widgets/SeekBar.cpp
     widgets/MarqueeLabel.cpp
     widgets/SnappingSplitter.cpp
+    widgets/StitchUI.cpp
     widgets/StatusBarContent.cpp
     widgets/Toast.cpp
     widgets/ToastHost.cpp
     widgets/TableView.cpp
     widgets/TitleBar.cpp
+    widgets/Windows11ProxyStyle.cpp
     widgets/WindowBar.cpp
     workarea/hexview/HexView.cpp
     workarea/hexview/HexViewRhiHost.cpp
@@ -80,6 +87,7 @@ target_sources(vgmtrans
       PlaybackControls.h
       Logger.h
       MainWindow.h
+      MainWindowDockLayout.h
       ManualCollectionDialog.h
       MenuBar.h
       QtVGMRoot.h
@@ -91,12 +99,15 @@ target_sources(vgmtrans
       services/commands/Command.h
       services/commands/GeneralCommands.h
       services/commands/SaveCommands.h
+      services/commands/StitchCommands.h
       services/commands/VGMCollCommands.h
   PRIVATE
     FILE_SET headers_util TYPE HEADERS BASE_DIRS util
     FILES
+      util/ColorHelpers.h
       util/Colors.h
       util/Helpers.h
+      util/InstructionHintLayout.h
       util/LambdaEventFilter.h
       util/Metrics.h
       util/TintableSvgIconEngine.h
@@ -105,6 +116,7 @@ target_sources(vgmtrans
     FILE_SET headers_widgets TYPE HEADERS BASE_DIRS widgets
     FILES
       widgets/FixedHeightListDelegate.h
+      widgets/EmptyStateWidget.h
       widgets/ItemViewDensity.h
       widgets/SeekBar.h
       widgets/MarqueeLabel.h
@@ -114,6 +126,7 @@ target_sources(vgmtrans
       widgets/TitleBar.h
       widgets/Toast.h
       widgets/ToastHost.h
+      widgets/Windows11ProxyStyle.h
       widgets/WindowBar.h
   PRIVATE
     FILE_SET headers_workarea TYPE HEADERS BASE_DIRS workarea

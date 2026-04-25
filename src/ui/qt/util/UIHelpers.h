@@ -30,9 +30,6 @@ QIcon stencilSvgIcon(const QString &iconPath, const QColor &color);
 QIcon gradientStencilSvgIcon(const QString &iconPath, const QColor &startColor, const QColor &endColor,
                              int angleDegrees = 90);
 QPixmap tintedIconPixmap(const QIcon &icon, const QSize &size, const QColor &color, qreal devicePixelRatio);
-QString cssColor(const QColor &color);
-QColor blendColors(const QColor &foreground, const QColor &background, qreal foregroundWeight);
-bool isDarkPalette(const QPalette &palette);
 void configureToolButton(QToolButton *button, const QString &toolTip, const QSize &buttonSize = QSize(),
                          const QSize &iconSize = QSize(), bool textOnly = false);
 QString toolBarButtonStyle(const QPalette &palette, bool checkable = false);

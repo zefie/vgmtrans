@@ -8,6 +8,7 @@
 #include "Helpers.h"
 #include "HexViewInput.h"
 #include "HexViewRhiHost.h"
+#include "util/NonTransientScrollBarStyle.h"
 #include "services/NotificationCenter.h"
 #include "VGMFile.h"
 
@@ -21,9 +22,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPixmap>
-#include <QProxyStyle>
 #include <QRawFont>
-#include <QStyleFactory>
 #include <QPainter>
 #include <QParallelAnimationGroup>
 #include <QPropertyAnimation>
@@ -98,22 +97,6 @@ WidgetLayoutMetrics computeWidgetLayoutMetrics(const QWidget* widget, int charWi
   layout.asciiEndPx = layout.asciiStartPx + (BYTES_PER_LINE * layout.charWidthPx);
   return layout;
 }
-
-#ifdef Q_OS_MAC
-class NonTransientScrollBarStyle final : public QProxyStyle {
-public:
-  using QProxyStyle::QProxyStyle;
-
-  int styleHint(StyleHint hint, const QStyleOption* option = nullptr,
-                const QWidget* widget = nullptr,
-                QStyleHintReturn* returnData = nullptr) const override {
-    if (hint == QStyle::SH_ScrollBar_Transient) {
-      return 0;
-    }
-    return QProxyStyle::styleHint(hint, option, widget, returnData);
-  }
-};
-#endif
 
 QString tooltipIconDataUrl(VGMItem::Type type) {
   static QHash<int, QString> cache;
@@ -353,6 +336,13 @@ uint64_t HexView::selectionKey(const FadePlaybackSelection& selection) {
 // Trivial destructor; QObject ownership handles child cleanup.
 HexView::~HexView() = default;
 
+QFont HexView::defaultViewFont() {
+  const double appFontPointSize = QApplication::font().pointSizeF();
+  QFont font("Roboto Mono", appFontPointSize);
+  font.setPointSizeF(appFontPointSize);
+  return font;
+}
+
 // Initialize HexView UI state, RHI host, typography, animations, and signal wiring.
 HexView::HexView(VGMFile* vgmfile, QWidget* parent)
     : QAbstractScrollArea(parent), m_vgmfile(vgmfile) {
@@ -363,25 +353,14 @@ HexView::HexView(VGMFile* vgmfile, QWidget* parent)
 #ifdef Q_OS_MAC
   // With AA_DontCreateNativeWidgetSiblings, the RHI QWindow can cover transient (overlay)
   // scrollbars, so keep HexView's scrollbars non-transient on macOS.
-  QStyle* baseStyle = QStyleFactory::create(QStringLiteral("macos"));
-  if (!baseStyle)
-    baseStyle = QStyleFactory::create(QStringLiteral("macintosh"));
-  if (!baseStyle)
-    baseStyle = QStyleFactory::create(QStringLiteral("Fusion"));
-  auto* scrollStyle = baseStyle ? new NonTransientScrollBarStyle(baseStyle)
-                                : new NonTransientScrollBarStyle();
-  verticalScrollBar()->setStyle(scrollStyle);
-  if (!scrollStyle->parent())
-    scrollStyle->setParent(verticalScrollBar());
+  QtUi::applyNonTransientScrollBarStyle(verticalScrollBar());
 #endif
 
   m_rhiHost = new HexViewRhiHost(this, viewport());
   m_rhiHost->setGeometry(viewport()->rect());
   m_rhiHost->show();
 
-  const double appFontPointSize = QApplication::font().pointSizeF();
-  QFont font("Roboto Mono", appFontPointSize);
-  font.setPointSizeF(appFontPointSize);
+  QFont font = defaultViewFont();
   setShadowStrength(SHADOW_STRENGTH);
   m_playbackGlowLow = PLAYBACK_GLOW_LOW;
   m_playbackGlowHigh = PLAYBACK_GLOW_HIGH;
@@ -415,6 +394,11 @@ HexView::HexView(VGMFile* vgmfile, QWidget* parent)
               return;
             }
             m_seekModifierActive = active;
+            if (!isVisible()) {
+              hideTooltip();
+              requestRhiUpdate();
+              return;
+            }
             m_outlineFadeClock.restart();
             if (!m_outlineFadeTimer.isActive()) {
               m_outlineFadeTimer.start(16, this);
@@ -530,6 +514,13 @@ int HexView::getViewportWidthSansAsciiAndAddress() const {
   return getVirtualWidthSansAsciiAndAddress() + VIEWPORT_PADDING;
 }
 
+std::vector<SplitterSnapRange> HexView::splitterSnapRanges() const {
+  return {
+      {getViewportWidthSansAsciiAndAddress(), getViewportWidthSansAscii()},
+      {getViewportWidthSansAscii(), getViewportFullWidth()},
+  };
+}
+
 // Sync vertical scrollbar range/steps with current content and viewport dimensions.
 void HexView::updateScrollBars() {
   const int totalHeight = getVirtualHeight();
@@ -627,6 +618,98 @@ void HexView::setSelectedItem(VGMItem* item) {
 
   selectCurrentItem(true);
 
+  if (!m_lineHeight) {
+    return;
+  }
+
+  const int itemBaseOffset = static_cast<int>(m_selectedItem->offset() - m_vgmfile->offset());
+  const int line = itemBaseOffset / BYTES_PER_LINE;
+  const int endLine = (itemBaseOffset + static_cast<int>(m_selectedItem->length())) / BYTES_PER_LINE;
+
+  const int viewStartLine = verticalScrollBar()->value() / m_lineHeight;
+  const int viewEndLine = viewStartLine + (viewport()->height() / m_lineHeight);
+
+  if (line <= viewEndLine && endLine > viewStartLine) {
+    return;
+  }
+
+  if (line < viewStartLine) {
+    verticalScrollBar()->setValue(line * m_lineHeight);
+  } else if (endLine > viewEndLine) {
+    if ((endLine - line) > (viewport()->height() / m_lineHeight)) {
+      verticalScrollBar()->setValue(line * m_lineHeight);
+    } else {
+      const int y = ((endLine + 1) * m_lineHeight) + 1 - viewport()->height();
+      verticalScrollBar()->setValue(y);
+    }
+  }
+}
+
+// Select multiple items, using the primary item as the anchor for keyboard focus and scroll-to-visible behavior.
+void HexView::setSelectedItems(const std::vector<const VGMItem*>& items,
+                               const VGMItem* primaryItem) {
+  if (items.empty()) {
+    setSelectedItem(nullptr);
+    return;
+  }
+
+  // If the caller did not provide an explicit primary item, fall back to the first non-null entry so we still have
+  // a stable anchor for the selection.
+  VGMItem* resolvedPrimary = const_cast<VGMItem*>(primaryItem);
+  if (!resolvedPrimary) {
+    for (const auto* item : items) {
+      if (item) {
+        resolvedPrimary = const_cast<VGMItem*>(item);
+        break;
+      }
+    }
+  }
+
+  if (!resolvedPrimary) {
+    setSelectedItem(nullptr);
+    return;
+  }
+
+  m_selectedItem = resolvedPrimary;
+  m_selectedOffset = m_selectedItem->offset();
+
+  std::vector<SelectionRange> selections;
+  selections.reserve(items.size());
+  std::unordered_set<uint64_t> keys;
+  keys.reserve(items.size() * 2 + 1);
+
+  for (const auto* item : items) {
+    if (!item) {
+      continue;
+    }
+    // Zero-length items still need a visible caret-width highlight in the hex view, so normalize them to a one-byte range.
+    const uint32_t length = item->length() > 0 ? item->length() : 1u;
+    const SelectionRange range{item->offset(), length};
+    // Ignore duplicate ranges so the renderer and highlight animation only see one entry per distinct byte span.
+    if (keys.insert(selectionKey(range)).second) {
+      selections.push_back(range);
+    }
+  }
+
+  if (selections.empty()) {
+    setSelectedItem(nullptr);
+    return;
+  }
+
+  // Keep the stored ranges ordered for deterministic rendering and hit-testing.
+  std::sort(selections.begin(), selections.end(), [](const SelectionRange& a, const SelectionRange& b) {
+    if (a.offset != b.offset) {
+      return a.offset < b.offset;
+    }
+    return a.length < b.length;
+  });
+
+  m_selections = std::move(selections);
+  m_fadeSelections.clear();
+  updateHighlightState(true);
+  requestRhiUpdate(false, true);
+
+  // Reuse the single-item visibility logic and anchor it to the primary item.
   if (!m_lineHeight) {
     return;
   }
@@ -1610,6 +1693,9 @@ void HexView::showTooltip(VGMItem* item, const QPoint& pos) {
 
 // Hide active tooltip and clear tracked tooltip item.
 void HexView::hideTooltip() {
+  if (m_tooltipItem == nullptr) {
+    return;
+  }
   QToolTip::hideText();
   m_tooltipItem = nullptr;
 }

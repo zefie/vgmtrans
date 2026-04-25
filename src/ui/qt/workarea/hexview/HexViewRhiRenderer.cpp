@@ -153,6 +153,10 @@ void HexViewRhiRenderer::initIfNeeded(QRhi* rhi) {
                                     QRhiSampler::ClampToEdge);
   m_maskSampler->create();
 
+  m_edgeFallbackTex = m_rhi->newTexture(QRhiTexture::RGBA8, QSize(1, 1), 1);
+  m_edgeFallbackTex->create();
+  m_edgeFallbackDirty = true;
+
   m_staticBuffersUploaded = false;
   m_sampleCount = 0;
   if (!m_animTimer.isValid()) {
@@ -177,6 +181,10 @@ void HexViewRhiRenderer::releaseResources() {
   m_edgePso = nullptr;
   delete m_compositePso;
   m_compositePso = nullptr;
+  delete m_outputRectPso;
+  m_outputRectPso = nullptr;
+  delete m_outputGlyphPso;
+  m_outputGlyphPso = nullptr;
 
   delete m_rectSrb;
   m_rectSrb = nullptr;
@@ -194,6 +202,8 @@ void HexViewRhiRenderer::releaseResources() {
   m_glyphTex = nullptr;
   delete m_itemIdTex;
   m_itemIdTex = nullptr;
+  delete m_edgeFallbackTex;
+  m_edgeFallbackTex = nullptr;
   delete m_glyphSampler;
   m_glyphSampler = nullptr;
   delete m_maskSampler;
@@ -340,6 +350,25 @@ void HexViewRhiRenderer::renderFrame(QRhiCommandBuffer* cb, const RenderTargetIn
   if (std::abs(m_outlineAlpha - targetOutline) > 0.001f) {
     m_view->requestPlaybackFrame();
   }
+  const bool hasSelections = !frame.selections.empty() || !frame.fadeSelections.empty();
+  const bool hasPlayback = !frame.playbackSelections.empty() || !frame.fadePlaybackSelections.empty();
+  const bool needsComposite = hasSelections || hasPlayback || outlineEnabled ||
+                              frame.overlayOpacity > 0.001;
+  const bool edgeEnabled = needsComposite &&
+      ((frame.shadowBlur > 0.0 && frame.shadowStrength > 0.0) ||
+       (frame.playbackGlowRadius > 0.0f && frame.playbackGlowStrength > 0.0f));
+  if (m_useEdgeFallback != !edgeEnabled) {
+    m_useEdgeFallback = !edgeEnabled;
+    m_compositeSrbDirty = true;
+  }
+
+  if (m_edgeFallbackTex && m_edgeFallbackDirty) {
+    QImage whitePixel(1, 1, QImage::Format_RGBA8888);
+    whitePixel.fill(Qt::white);
+    u->uploadTexture(m_edgeFallbackTex, whitePixel);
+    m_edgeFallbackDirty = false;
+  }
+
   ensureItemIdTexture(u, startLine, endLine, totalLines, frame);
   ensureRenderTargets(target.pixelSize);
   const int sampleCount = std::max(1, target.sampleCount);
@@ -370,43 +399,116 @@ void HexViewRhiRenderer::renderFrame(QRhiCommandBuffer* cb, const RenderTargetIn
   }
 
   const QColor clearColor = frame.windowColor;
+  const QRhiViewport viewport(0, 0, target.pixelSize.width(), target.pixelSize.height());
+
+  auto drawInstanced = [&](QRhiGraphicsPipeline* pso,
+                           QRhiShaderResourceBindings* srb,
+                           QRhiBuffer* instanceBuffer,
+                           int count,
+                           int firstInstance,
+                           int instanceStride) {
+    if (!pso || !srb || !instanceBuffer || count <= 0) {
+      return;
+    }
+    quint32 instanceOffset = 0;
+    int drawFirstInstance = firstInstance;
+    if (!m_supportsBaseInstance && firstInstance > 0) {
+      instanceOffset = static_cast<quint32>(firstInstance * instanceStride);
+      drawFirstInstance = 0;
+    }
+    cb->setGraphicsPipeline(pso);
+    cb->setShaderResources(srb);
+    const QRhiCommandBuffer::VertexInput bindings[] = {
+        {m_vbuf, 0},
+        {instanceBuffer, instanceOffset},
+    };
+    cb->setVertexInput(0, 2, bindings, m_ibuf, 0, QRhiCommandBuffer::IndexUInt16);
+    cb->drawIndexed(6, count, 0, 0, drawFirstInstance);
+  };
+
+  auto drawFullscreen = [&](QRhiGraphicsPipeline* pso, QRhiShaderResourceBindings* srb) {
+    if (!pso || !srb) {
+      return;
+    }
+    cb->setGraphicsPipeline(pso);
+    cb->setShaderResources(srb);
+    const QRhiCommandBuffer::VertexInput bindings[] = {{m_vbuf, 0}};
+    cb->setVertexInput(0, 1, bindings, m_ibuf, 0, QRhiCommandBuffer::IndexUInt16);
+    cb->drawIndexed(6, 1, 0, 0, 0);
+  };
+
+  // Submit uploads before the first pass so render-pass startup does not also
+  // carry resource-update work on backends that are sensitive to it.
+  if (u) {
+    cb->resourceUpdate(u);
+  }
+
+  if (!needsComposite) {
+    cb->beginPass(target.renderTarget, clearColor, {1.0f, 0}, nullptr);
+    cb->setViewport(viewport);
+    drawInstanced(m_outputRectPso,
+                  m_rectSrb,
+                  m_baseRectBuf,
+                  baseRectCount,
+                  baseRectFirst,
+                  static_cast<int>(sizeof(RectInstance)));
+    drawInstanced(m_outputGlyphPso,
+                  m_glyphSrb,
+                  m_baseGlyphBuf,
+                  baseGlyphCount,
+                  baseGlyphFirst,
+                  static_cast<int>(sizeof(GlyphInstance)));
+    cb->endPass();
+    return;
+  }
 
   // Pass 1: base content (background spans + glyphs) into an offscreen texture.
-  cb->beginPass(m_contentRt, clearColor, {1.0f, 0}, u);
-  cb->setViewport(QRhiViewport(0, 0, target.pixelSize.width(), target.pixelSize.height()));
-  drawRectBuffer(cb, m_baseRectBuf, baseRectCount, baseRectFirst);
-  drawGlyphBuffer(cb, m_baseGlyphBuf, baseGlyphCount, baseGlyphFirst);
+  cb->beginPass(m_contentRt, clearColor, {1.0f, 0}, nullptr);
+  cb->setViewport(viewport);
+  drawInstanced(m_rectPso,
+                m_rectSrb,
+                m_baseRectBuf,
+                baseRectCount,
+                baseRectFirst,
+                static_cast<int>(sizeof(RectInstance)));
+  drawInstanced(m_glyphPso,
+                m_glyphSrb,
+                m_baseGlyphBuf,
+                baseGlyphCount,
+                baseGlyphFirst,
+                static_cast<int>(sizeof(GlyphInstance)));
   cb->endPass();
 
   // Pass 2: selection/playback mask into an offscreen texture.
   // Channel encoding:
   // R=selection mask, G=active playback, B=fading playback, A=fade alpha.
   cb->beginPass(m_maskRt, QColor(0, 0, 0, 0), {1.0f, 0}, nullptr);
-  cb->setViewport(QRhiViewport(0, 0, target.pixelSize.width(), target.pixelSize.height()));
-  drawRectBuffer(cb, m_maskRectBuf, static_cast<int>(m_maskRectInstances.size()), 0, nullptr,
-                 m_maskPso);
+  cb->setViewport(viewport);
+  drawInstanced(m_maskPso,
+                m_rectSrb,
+                m_maskRectBuf,
+                static_cast<int>(m_maskRectInstances.size()),
+                0,
+                static_cast<int>(sizeof(RectInstance)));
   cb->endPass();
 
   // Pass 3: edge field for drop shadow and playback glow falloff.
-  const bool edgeEnabled = !m_edgeRectInstances.empty() &&
-      ((frame.shadowBlur > 0.0 && frame.shadowStrength > 0.0) ||
-       (frame.playbackGlowRadius > 0.0f && frame.playbackGlowStrength > 0.0f));
   if (edgeEnabled) {
     cb->beginPass(m_edgeRt, QColor(255, 255, 255, 255), {1.0f, 0}, nullptr);
-    cb->setViewport(QRhiViewport(0, 0, target.pixelSize.width(), target.pixelSize.height()));
-    drawEdgeBuffer(cb, m_edgeRectBuf, static_cast<int>(m_edgeRectInstances.size()), 0,
-                   m_edgeSrb, m_edgePso);
-    cb->endPass();
-  } else {
-    cb->beginPass(m_edgeRt, QColor(255, 255, 255, 255), {1.0f, 0}, nullptr);
-    cb->setViewport(QRhiViewport(0, 0, target.pixelSize.width(), target.pixelSize.height()));
+    cb->setViewport(viewport);
+    drawInstanced(m_edgePso,
+                  m_edgeSrb,
+                  m_edgeRectBuf,
+                  static_cast<int>(m_edgeRectInstances.size()),
+                  0,
+                  static_cast<int>(sizeof(EdgeInstance)));
     cb->endPass();
   }
 
   // Pass 4: fullscreen composite combines content + mask + edge + item-id textures.
   cb->beginPass(target.renderTarget, clearColor, {1.0f, 0}, nullptr);
-  cb->setViewport(QRhiViewport(0, 0, target.pixelSize.width(), target.pixelSize.height()));
-  drawFullscreen(cb, m_compositePso, m_compositeSrb);
+  cb->setViewport(viewport);
+  drawFullscreen(m_compositePso, m_compositeSrb);
   cb->endPass();
 }
 
@@ -482,50 +584,56 @@ void HexViewRhiRenderer::ensurePipelines(QRhiRenderPassDescriptor* outputRp,
   m_sampleCount = outputSampleCount;
   m_pipelinesDirty = false;
 
-  delete m_rectPso;
-  delete m_glyphPso;
-  delete m_maskPso;
-  delete m_edgePso;
-  delete m_compositePso;
-  delete m_rectSrb;
-  delete m_glyphSrb;
-  delete m_edgeSrb;
-  delete m_compositeSrb;
+  auto resetOwned = [](auto*& ptr) {
+    delete ptr;
+    ptr = nullptr;
+  };
+  resetOwned(m_rectPso);
+  resetOwned(m_glyphPso);
+  resetOwned(m_maskPso);
+  resetOwned(m_edgePso);
+  resetOwned(m_compositePso);
+  resetOwned(m_outputRectPso);
+  resetOwned(m_outputGlyphPso);
+  resetOwned(m_rectSrb);
+  resetOwned(m_glyphSrb);
+  resetOwned(m_edgeSrb);
+  resetOwned(m_compositeSrb);
 
-  m_rectSrb = m_rhi->newShaderResourceBindings();
-  m_rectSrb->setBindings({
-    QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_ubuf)
+  auto createSrb = [&](QRhiShaderResourceBindings*& srb,
+                       std::initializer_list<QRhiShaderResourceBinding> bindings) {
+    srb = m_rhi->newShaderResourceBindings();
+    srb->setBindings(bindings);
+    srb->create();
+  };
+  createSrb(m_rectSrb, {
+      QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_ubuf),
   });
-  m_rectSrb->create();
-
-  m_glyphSrb = m_rhi->newShaderResourceBindings();
-  m_glyphSrb->setBindings({
-    QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_ubuf),
-    QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
-                                              m_glyphTex, m_glyphSampler)
+  createSrb(m_glyphSrb, {
+      QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_ubuf),
+      QRhiShaderResourceBinding::sampledTexture(1,
+                                                QRhiShaderResourceBinding::FragmentStage,
+                                                m_glyphTex,
+                                                m_glyphSampler),
   });
-  m_glyphSrb->create();
-
-  m_edgeSrb = m_rhi->newShaderResourceBindings();
-  m_edgeSrb->setBindings({
-    QRhiShaderResourceBinding::uniformBuffer(0,
-                                             QRhiShaderResourceBinding::VertexStage |
-                                             QRhiShaderResourceBinding::FragmentStage,
-                                             m_edgeUbuf)
+  createSrb(m_edgeSrb, {
+      QRhiShaderResourceBinding::uniformBuffer(
+          0,
+          QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
+          m_edgeUbuf),
   });
-  m_edgeSrb->create();
-
   m_compositeSrb = m_rhi->newShaderResourceBindings();
   updateCompositeSrb();
+  m_compositeSrbDirty = false;
 
-  QShader rectVert = loadShader(":/shaders/hexquad.vert.qsb");
-  QShader rectFrag = loadShader(":/shaders/hexquad.frag.qsb");
-  QShader glyphVert = loadShader(":/shaders/hexglyph.vert.qsb");
-  QShader glyphFrag = loadShader(":/shaders/hexglyph.frag.qsb");
-  QShader screenVert = loadShader(":/shaders/hexscreen.vert.qsb");
-  QShader edgeVert = loadShader(":/shaders/hexedge.vert.qsb");
-  QShader edgeFrag = loadShader(":/shaders/hexedge.frag.qsb");
-  QShader compositeFrag = loadShader(":/shaders/hexcomposite.frag.qsb");
+  const QShader rectVert = loadShader(":/shaders/hexquad.vert.qsb");
+  const QShader rectFrag = loadShader(":/shaders/hexquad.frag.qsb");
+  const QShader glyphVert = loadShader(":/shaders/hexglyph.vert.qsb");
+  const QShader glyphFrag = loadShader(":/shaders/hexglyph.frag.qsb");
+  const QShader screenVert = loadShader(":/shaders/hexscreen.vert.qsb");
+  const QShader edgeVert = loadShader(":/shaders/hexedge.vert.qsb");
+  const QShader edgeFrag = loadShader(":/shaders/hexedge.frag.qsb");
+  const QShader compositeFrag = loadShader(":/shaders/hexcomposite.frag.qsb");
 
   QRhiVertexInputLayout rectInputLayout;
   rectInputLayout.setBindings({
@@ -595,59 +703,83 @@ void HexViewRhiRenderer::ensurePipelines(QRhiRenderPassDescriptor* outputRp,
   edgeBlend.dstAlpha = QRhiGraphicsPipeline::One;
   edgeBlend.opAlpha = QRhiGraphicsPipeline::Min;
 
-  m_rectPso = m_rhi->newGraphicsPipeline();
-  m_rectPso->setShaderStages({{QRhiShaderStage::Vertex, rectVert},
-                              {QRhiShaderStage::Fragment, rectFrag}});
-  m_rectPso->setVertexInputLayout(rectInputLayout);
-  m_rectPso->setShaderResourceBindings(m_rectSrb);
-  m_rectPso->setCullMode(QRhiGraphicsPipeline::None);
-  m_rectPso->setTargetBlends({blend});
-  m_rectPso->setSampleCount(1);
-  m_rectPso->setRenderPassDescriptor(m_contentRp);
-  m_rectPso->create();
+  auto createPipeline = [&](QRhiGraphicsPipeline*& pso,
+                            const QShader& vs,
+                            const QShader& fs,
+                            const QRhiVertexInputLayout& inputLayout,
+                            QRhiShaderResourceBindings* srb,
+                            const QRhiGraphicsPipeline::TargetBlend* targetBlend,
+                            int sampleCount,
+                            QRhiRenderPassDescriptor* rp) {
+    pso = m_rhi->newGraphicsPipeline();
+    pso->setShaderStages({{QRhiShaderStage::Vertex, vs}, {QRhiShaderStage::Fragment, fs}});
+    pso->setVertexInputLayout(inputLayout);
+    pso->setShaderResourceBindings(srb);
+    pso->setCullMode(QRhiGraphicsPipeline::None);
+    if (targetBlend) {
+      pso->setTargetBlends({*targetBlend});
+    }
+    pso->setSampleCount(sampleCount);
+    pso->setRenderPassDescriptor(rp);
+    pso->create();
+  };
 
-  m_glyphPso = m_rhi->newGraphicsPipeline();
-  m_glyphPso->setShaderStages({{QRhiShaderStage::Vertex, glyphVert},
-                               {QRhiShaderStage::Fragment, glyphFrag}});
-  m_glyphPso->setVertexInputLayout(glyphInputLayout);
-  m_glyphPso->setShaderResourceBindings(m_glyphSrb);
-  m_glyphPso->setCullMode(QRhiGraphicsPipeline::None);
-  m_glyphPso->setTargetBlends({blend});
-  m_glyphPso->setSampleCount(1);
-  m_glyphPso->setRenderPassDescriptor(m_contentRp);
-  m_glyphPso->create();
-
-  m_maskPso = m_rhi->newGraphicsPipeline();
-  m_maskPso->setShaderStages({{QRhiShaderStage::Vertex, rectVert},
-                              {QRhiShaderStage::Fragment, rectFrag}});
-  m_maskPso->setVertexInputLayout(rectInputLayout);
-  m_maskPso->setShaderResourceBindings(m_rectSrb);
-  m_maskPso->setCullMode(QRhiGraphicsPipeline::None);
-  m_maskPso->setTargetBlends({maskBlend});
-  m_maskPso->setSampleCount(1);
-  m_maskPso->setRenderPassDescriptor(m_maskRp);
-  m_maskPso->create();
-
-  m_edgePso = m_rhi->newGraphicsPipeline();
-  m_edgePso->setShaderStages({{QRhiShaderStage::Vertex, edgeVert},
-                              {QRhiShaderStage::Fragment, edgeFrag}});
-  m_edgePso->setVertexInputLayout(edgeInputLayout);
-  m_edgePso->setShaderResourceBindings(m_edgeSrb);
-  m_edgePso->setCullMode(QRhiGraphicsPipeline::None);
-  m_edgePso->setTargetBlends({edgeBlend});
-  m_edgePso->setSampleCount(1);
-  m_edgePso->setRenderPassDescriptor(m_edgeRp);
-  m_edgePso->create();
-
-  m_compositePso = m_rhi->newGraphicsPipeline();
-  m_compositePso->setShaderStages({{QRhiShaderStage::Vertex, screenVert},
-                                   {QRhiShaderStage::Fragment, compositeFrag}});
-  m_compositePso->setVertexInputLayout(screenInputLayout);
-  m_compositePso->setShaderResourceBindings(m_compositeSrb);
-  m_compositePso->setCullMode(QRhiGraphicsPipeline::None);
-  m_compositePso->setSampleCount(m_sampleCount);
-  m_compositePso->setRenderPassDescriptor(m_outputRp);
-  m_compositePso->create();
+  createPipeline(m_rectPso,
+                 rectVert,
+                 rectFrag,
+                 rectInputLayout,
+                 m_rectSrb,
+                 &blend,
+                 1,
+                 m_contentRp);
+  createPipeline(m_glyphPso,
+                 glyphVert,
+                 glyphFrag,
+                 glyphInputLayout,
+                 m_glyphSrb,
+                 &blend,
+                 1,
+                 m_contentRp);
+  createPipeline(m_maskPso,
+                 rectVert,
+                 rectFrag,
+                 rectInputLayout,
+                 m_rectSrb,
+                 &maskBlend,
+                 1,
+                 m_maskRp);
+  createPipeline(m_edgePso,
+                 edgeVert,
+                 edgeFrag,
+                 edgeInputLayout,
+                 m_edgeSrb,
+                 &edgeBlend,
+                 1,
+                 m_edgeRp);
+  createPipeline(m_compositePso,
+                 screenVert,
+                 compositeFrag,
+                 screenInputLayout,
+                 m_compositeSrb,
+                 nullptr,
+                 m_sampleCount,
+                 m_outputRp);
+  createPipeline(m_outputRectPso,
+                 rectVert,
+                 rectFrag,
+                 rectInputLayout,
+                 m_rectSrb,
+                 &blend,
+                 m_sampleCount,
+                 m_outputRp);
+  createPipeline(m_outputGlyphPso,
+                 glyphVert,
+                 glyphFrag,
+                 glyphInputLayout,
+                 m_glyphSrb,
+                 &blend,
+                 m_sampleCount,
+                 m_outputRp);
 }
 
 // Upload the glyph atlas texture when the source atlas version changes.
@@ -775,6 +907,7 @@ void HexViewRhiRenderer::updateCompositeSrb() {
   if (!m_compositeSrb) {
     return;
   }
+  QRhiTexture* edgeSampleTex = m_useEdgeFallback ? m_edgeFallbackTex : m_edgeTex;
   m_compositeSrb->setBindings({
     QRhiShaderResourceBinding::uniformBuffer(0,
                                              QRhiShaderResourceBinding::VertexStage |
@@ -785,7 +918,7 @@ void HexViewRhiRenderer::updateCompositeSrb() {
     QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
                                               m_maskTex, m_maskSampler),
     QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
-                                              m_edgeTex, m_glyphSampler),
+                                              edgeSampleTex, m_glyphSampler),
     QRhiShaderResourceBinding::sampledTexture(4, QRhiShaderResourceBinding::FragmentStage,
                                               m_itemIdTex, m_maskSampler)
   });
@@ -880,151 +1013,47 @@ void HexViewRhiRenderer::updateUniforms(QRhiResourceUpdateBatch* u, float scroll
                          &itemIdWindow);
 }
 
-// Ensure dynamic instance buffer exists and is large enough for current upload size.
+// Ensure dynamic instance buffer exists and can hold current data; grow geometrically.
 bool HexViewRhiRenderer::ensureInstanceBuffer(QRhiBuffer*& buffer, int bytes) {
-  if (bytes <= 0) {
-    bytes = 1;
+  const int requiredBytes = std::max(1, bytes);
+  if (buffer && buffer->size() >= static_cast<quint32>(requiredBytes)) {
+    return false;
   }
-  if (!buffer || buffer->size() < static_cast<quint32>(bytes)) {
-    delete buffer;
-    buffer = m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::VertexBuffer, bytes);
-    buffer->create();
-    return true;
+
+  int allocBytes = requiredBytes;
+  if (buffer) {
+    allocBytes = std::max(requiredBytes, static_cast<int>(buffer->size()) * 2);
+  } else {
+    allocBytes = std::max(requiredBytes, 1024);
   }
-  return false;
+
+  delete buffer;
+  buffer = m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::VertexBuffer, allocBytes);
+  buffer->create();
+  return true;
 }
 
 // Upload dirty base/mask/edge instance arrays to their corresponding dynamic buffers.
 void HexViewRhiRenderer::updateInstanceBuffers(QRhiResourceUpdateBatch* u) {
-  bool baseRectResized = ensureInstanceBuffer(
-      m_baseRectBuf, static_cast<int>(m_baseRectInstances.size() * sizeof(RectInstance)));
-  if ((m_baseBufferDirty || baseRectResized) && !m_baseRectInstances.empty()) {
-    u->updateDynamicBuffer(m_baseRectBuf, 0,
-                           static_cast<int>(m_baseRectInstances.size() * sizeof(RectInstance)),
-                           m_baseRectInstances.data());
-  }
+  auto uploadIfDirty = [&](QRhiBuffer*& buffer, const void* data, int bytes, bool dirty) {
+    const bool resized = ensureInstanceBuffer(buffer, bytes);
+    if ((dirty || resized) && bytes > 0 && data) {
+      u->updateDynamicBuffer(buffer, 0, bytes, data);
+    }
+  };
 
-  bool baseGlyphResized = ensureInstanceBuffer(
-      m_baseGlyphBuf, static_cast<int>(m_baseGlyphInstances.size() * sizeof(GlyphInstance)));
-  if ((m_baseBufferDirty || baseGlyphResized) && !m_baseGlyphInstances.empty()) {
-    u->updateDynamicBuffer(m_baseGlyphBuf, 0,
-                           static_cast<int>(m_baseGlyphInstances.size() * sizeof(GlyphInstance)),
-                           m_baseGlyphInstances.data());
-  }
+  const int baseRectBytes = static_cast<int>(m_baseRectInstances.size() * sizeof(RectInstance));
+  const int baseGlyphBytes = static_cast<int>(m_baseGlyphInstances.size() * sizeof(GlyphInstance));
+  const int maskRectBytes = static_cast<int>(m_maskRectInstances.size() * sizeof(RectInstance));
+  const int edgeRectBytes = static_cast<int>(m_edgeRectInstances.size() * sizeof(EdgeInstance));
 
-  bool maskRectResized = ensureInstanceBuffer(
-      m_maskRectBuf, static_cast<int>(m_maskRectInstances.size() * sizeof(RectInstance)));
-  if ((m_selectionBufferDirty || maskRectResized) && !m_maskRectInstances.empty()) {
-    u->updateDynamicBuffer(m_maskRectBuf, 0,
-                           static_cast<int>(m_maskRectInstances.size() * sizeof(RectInstance)),
-                           m_maskRectInstances.data());
-  }
-
-  bool edgeRectResized = ensureInstanceBuffer(
-      m_edgeRectBuf, static_cast<int>(m_edgeRectInstances.size() * sizeof(EdgeInstance)));
-  if ((m_selectionBufferDirty || edgeRectResized) && !m_edgeRectInstances.empty()) {
-    u->updateDynamicBuffer(m_edgeRectBuf, 0,
-                           static_cast<int>(m_edgeRectInstances.size() * sizeof(EdgeInstance)),
-                           m_edgeRectInstances.data());
-  }
+  uploadIfDirty(m_baseRectBuf, m_baseRectInstances.data(), baseRectBytes, m_baseBufferDirty);
+  uploadIfDirty(m_baseGlyphBuf, m_baseGlyphInstances.data(), baseGlyphBytes, m_baseBufferDirty);
+  uploadIfDirty(m_maskRectBuf, m_maskRectInstances.data(), maskRectBytes, m_selectionBufferDirty);
+  uploadIfDirty(m_edgeRectBuf, m_edgeRectInstances.data(), edgeRectBytes, m_selectionBufferDirty);
 
   m_baseBufferDirty = false;
   m_selectionBufferDirty = false;
-}
-
-// Draw instanced rectangle geometry for base content or mask pass.
-void HexViewRhiRenderer::drawRectBuffer(QRhiCommandBuffer* cb, QRhiBuffer* buffer, int count,
-                                       int firstInstance, QRhiShaderResourceBindings* srb,
-                                       QRhiGraphicsPipeline* pso) {
-  if (!buffer || count <= 0) {
-    return;
-  }
-  if (!srb) {
-    srb = m_rectSrb;
-  }
-  if (!pso) {
-    pso = m_rectPso;
-  }
-  quint32 instanceOffset = 0;
-  int drawFirstInstance = firstInstance;
-  if (!m_supportsBaseInstance && firstInstance > 0) {
-    instanceOffset = static_cast<quint32>(firstInstance * sizeof(RectInstance));
-    drawFirstInstance = 0;
-  }
-  cb->setGraphicsPipeline(pso);
-  cb->setShaderResources(srb);
-  const QRhiCommandBuffer::VertexInput vbufBindings[] = {
-    {m_vbuf, 0},
-    {buffer, instanceOffset}
-  };
-  cb->setVertexInput(0, 2, vbufBindings, m_ibuf, 0, QRhiCommandBuffer::IndexUInt16);
-  cb->drawIndexed(6, count, 0, 0, drawFirstInstance);
-}
-
-// Draw instanced edge geometry used to produce shadow/glow distance fields.
-void HexViewRhiRenderer::drawEdgeBuffer(QRhiCommandBuffer* cb, QRhiBuffer* buffer, int count,
-                                       int firstInstance, QRhiShaderResourceBindings* srb,
-                                       QRhiGraphicsPipeline* pso) {
-  if (!buffer || count <= 0) {
-    return;
-  }
-  if (!srb) {
-    srb = m_edgeSrb;
-  }
-  if (!pso) {
-    pso = m_edgePso;
-  }
-  quint32 instanceOffset = 0;
-  int drawFirstInstance = firstInstance;
-  if (!m_supportsBaseInstance && firstInstance > 0) {
-    instanceOffset = static_cast<quint32>(firstInstance * sizeof(EdgeInstance));
-    drawFirstInstance = 0;
-  }
-  cb->setGraphicsPipeline(pso);
-  cb->setShaderResources(srb);
-  const QRhiCommandBuffer::VertexInput vbufBindings[] = {
-    {m_vbuf, 0},
-    {buffer, instanceOffset}
-  };
-  cb->setVertexInput(0, 2, vbufBindings, m_ibuf, 0, QRhiCommandBuffer::IndexUInt16);
-  cb->drawIndexed(6, count, 0, 0, drawFirstInstance);
-}
-
-// Draw instanced glyph quads sampling from the glyph atlas texture.
-void HexViewRhiRenderer::drawGlyphBuffer(QRhiCommandBuffer* cb, QRhiBuffer* buffer, int count,
-                                        int firstInstance) {
-  if (!buffer || count <= 0) {
-    return;
-  }
-  quint32 instanceOffset = 0;
-  int drawFirstInstance = firstInstance;
-  if (!m_supportsBaseInstance && firstInstance > 0) {
-    instanceOffset = static_cast<quint32>(firstInstance * sizeof(GlyphInstance));
-    drawFirstInstance = 0;
-  }
-  cb->setGraphicsPipeline(m_glyphPso);
-  cb->setShaderResources(m_glyphSrb);
-  const QRhiCommandBuffer::VertexInput vbufBindings[] = {
-    {m_vbuf, 0},
-    {buffer, instanceOffset}
-  };
-  cb->setVertexInput(0, 2, vbufBindings, m_ibuf, 0, QRhiCommandBuffer::IndexUInt16);
-  cb->drawIndexed(6, count, 0, 0, drawFirstInstance);
-}
-
-// Draw a single fullscreen quad for the composite post-process pass.
-void HexViewRhiRenderer::drawFullscreen(QRhiCommandBuffer* cb, QRhiGraphicsPipeline* pso,
-                                        QRhiShaderResourceBindings* srb) {
-  if (!pso || !srb) {
-    return;
-  }
-  cb->setGraphicsPipeline(pso);
-  cb->setShaderResources(srb);
-  const QRhiCommandBuffer::VertexInput vbufBindings[] = {
-    {m_vbuf, 0}
-  };
-  cb->setVertexInput(0, 1, vbufBindings, m_ibuf, 0, QRhiCommandBuffer::IndexUInt16);
-  cb->drawIndexed(6, 1, 0, 0, 0);
 }
 
 // Resolve atlas UVs for a character, with '.' as a fallback glyph.
@@ -1178,6 +1207,14 @@ void HexViewRhiRenderer::buildBaseInstances(const HexViewFrame::Data& frame,
     hexUvs[i] = glyphUv(QLatin1Char(kHexDigits[i]), frame);
   }
   const QRectF spaceUv = glyphUv(QLatin1Char(' '), frame);
+  std::array<QRectF, 256> asciiUvs{};
+  if (frame.shouldDrawAscii) {
+    const QRectF fallbackUv = glyphUv(QLatin1Char('.'), frame);
+    asciiUvs.fill(fallbackUv);
+    for (int c = 0x20; c <= 0x7E; ++c) {
+      asciiUvs[static_cast<size_t>(c)] = glyphUv(QLatin1Char(static_cast<char>(c)), frame);
+    }
+  }
 
   for (const auto& entry : m_cachedLines) {
     LineRange range{};
@@ -1246,10 +1283,15 @@ void HexViewRhiRenderer::buildBaseInstances(const HexViewFrame::Data& frame,
                   spaceUv, textColor);
 
       if (frame.shouldDrawAscii) {
-        const char asciiChar = isPrintable(value) ? static_cast<char>(value) : '.';
+        const uint8_t asciiChar = isPrintable(value) ? value : static_cast<uint8_t>('.');
         const float asciiX = asciiStartX + i * charWidth;
-        appendGlyph(m_baseGlyphInstances, asciiX, y, charWidth, lineHeight,
-                    glyphUv(QLatin1Char(asciiChar), frame), textColor);
+        appendGlyph(m_baseGlyphInstances,
+                    asciiX,
+                    y,
+                    charWidth,
+                    lineHeight,
+                    asciiUvs[static_cast<size_t>(asciiChar)],
+                    textColor);
       }
     }
 
@@ -1259,12 +1301,51 @@ void HexViewRhiRenderer::buildBaseInstances(const HexViewFrame::Data& frame,
   }
 }
 
-// Convert byte-range selections into per-visible-line byte-column intervals.
-void HexViewRhiRenderer::collectIntervalsForSelections(
+// Build mask and edge geometry for a selection set across the visible range.
+void HexViewRhiRenderer::appendMaskForSelections(
     const std::vector<HexViewFrame::SelectionRange>& selections,
-    const SelectionBuildContext& ctx,
-    std::vector<std::vector<Interval>>& perLine) const {
-  perLine.assign(static_cast<size_t>(ctx.visibleCount), {});
+                                                 const SelectionBuildContext& ctx,
+                                                 float padX,
+                                                 float padY,
+                                                 float edgePad,
+                                                 const QVector4D& maskColor,
+                                                 const QVector4D& edgeColor) {
+  if (selections.empty() || ctx.visibleCount <= 0) {
+    return;
+  }
+
+  struct EdgeRun {
+    int startCol = 0;
+    int endCol = 0;
+    int startLine = 0;
+    int endLine = 0;
+  };
+  constexpr int kIntervalCoordCount = kBytesPerLine + 1;
+  constexpr int kIntervalKeyCount = kIntervalCoordCount * kIntervalCoordCount;
+
+  std::vector<uint8_t> lineBytes(static_cast<size_t>(ctx.visibleCount), 0);
+  std::vector<uint16_t> lineMasks(static_cast<size_t>(ctx.visibleCount), 0);
+
+  for (int line = ctx.startLine; line <= ctx.endLine; ++line) {
+    const CachedLine* entry = cachedLineFor(line);
+    if (entry && entry->bytes > 0) {
+      lineBytes[static_cast<size_t>(line - ctx.startLine)] =
+          static_cast<uint8_t>(std::min(entry->bytes, kBytesPerLine));
+    }
+  }
+
+  auto spanMaskBits = [](int startCol, int endCol) -> uint16_t {
+    const int start = std::clamp(startCol, 0, kBytesPerLine);
+    const int end = std::clamp(endCol, 0, kBytesPerLine);
+    if (end <= start) {
+      return 0;
+    }
+    const uint32_t lowMask = (start > 0) ? ((uint32_t(1) << start) - 1u) : 0u;
+    const uint32_t highMask = (end >= kBytesPerLine)
+                                  ? 0xFFFFu
+                                  : ((uint32_t(1) << end) - 1u);
+    return static_cast<uint16_t>(highMask & ~lowMask);
+  };
 
   for (const auto& selection : selections) {
     if (selection.length == 0) {
@@ -1288,143 +1369,136 @@ void HexViewRhiRenderer::collectIntervalsForSelections(
     const int lineEnd = std::min(ctx.endLine, selEndLine);
 
     for (int line = lineStart; line <= lineEnd; ++line) {
-      const CachedLine* entry = cachedLineFor(line);
-      if (!entry || entry->bytes <= 0) {
+      const size_t lineIndex = static_cast<size_t>(line - ctx.startLine);
+      const int lineByteCount = static_cast<int>(lineBytes[lineIndex]);
+      if (lineByteCount <= 0) {
         continue;
       }
 
       const int lineOffset = line * kBytesPerLine;
       const int startCol = (line == selStartLine) ? (selectionStart - lineOffset) : 0;
-      const int endCol = (line == selEndLine) ? (selectionEnd - lineOffset) : entry->bytes;
-
-      const int clampedStart = std::clamp(startCol, 0, entry->bytes);
-      const int clampedEnd = std::clamp(endCol, 0, entry->bytes);
+      const int endCol = (line == selEndLine) ? (selectionEnd - lineOffset) : lineByteCount;
+      const int clampedStart = std::clamp(startCol, 0, lineByteCount);
+      const int clampedEnd = std::clamp(endCol, 0, lineByteCount);
       if (clampedEnd <= clampedStart) {
         continue;
       }
-
-      perLine[static_cast<size_t>(line - ctx.startLine)].push_back({clampedStart, clampedEnd});
+      lineMasks[lineIndex] |= spanMaskBits(clampedStart, clampedEnd);
     }
   }
-}
 
-// Sort and merge overlapping/adjacent intervals on a single line.
-std::vector<HexViewRhiRenderer::Interval> HexViewRhiRenderer::mergeIntervals(
-    std::vector<Interval>& intervals) {
-  if (intervals.empty()) {
-    return {};
-  }
-  std::sort(intervals.begin(), intervals.end(),
-            [](const Interval& a, const Interval& b) { return a.start < b.start; });
-
-  std::vector<Interval> merged;
-  merged.reserve(intervals.size());
-  for (const auto& interval : intervals) {
-    if (merged.empty() || interval.start > merged.back().end) {
-      merged.push_back(interval);
-    } else {
-      merged.back().end = std::max(merged.back().end, interval.end);
+  auto appendMaskSpan = [&](int line, int startCol, int endCol) {
+    const int spanLen = endCol - startCol;
+    if (spanLen <= 0) {
+      return;
     }
-  }
-  return merged;
-}
-
-// Emit mask quads for merged selection intervals on one visible line.
-void HexViewRhiRenderer::appendMaskRectsForIntervals(const std::vector<Interval>& intervals,
-                                                     int line,
-                                                     const SelectionBuildContext& ctx,
-                                                     float padX,
-                                                     float padY,
-                                                     const QVector4D& maskColor) {
-  const float y = line * ctx.lineHeight;
-  for (const auto& interval : intervals) {
-    const int length = interval.end - interval.start;
-    if (length <= 0) {
-      continue;
-    }
-
-    const float hexX = ctx.hexStartX + interval.start * 3.0f * ctx.charWidth - padX;
-    appendRect(m_maskRectInstances, hexX, y - padY,
-               length * 3.0f * ctx.charWidth + padX * 2.0f,
-               ctx.lineHeight + padY * 2.0f, maskColor);
+    const float y = line * ctx.lineHeight;
+    const float hexX = ctx.hexStartX + startCol * 3.0f * ctx.charWidth - padX;
+    appendRect(m_maskRectInstances,
+               hexX,
+               y - padY,
+               spanLen * 3.0f * ctx.charWidth + padX * 2.0f,
+               ctx.lineHeight + padY * 2.0f,
+               maskColor);
     if (ctx.shouldDrawAscii) {
-      const float asciiX = ctx.asciiStartX + interval.start * ctx.charWidth - padX;
-      appendRect(m_maskRectInstances, asciiX, y - padY,
-                 length * ctx.charWidth + padX * 2.0f,
-                 ctx.lineHeight + padY * 2.0f, maskColor);
+      const float asciiX = ctx.asciiStartX + startCol * ctx.charWidth - padX;
+      appendRect(m_maskRectInstances,
+                 asciiX,
+                 y - padY,
+                 spanLen * ctx.charWidth + padX * 2.0f,
+                 ctx.lineHeight + padY * 2.0f,
+                 maskColor);
     }
-  }
-}
+  };
 
-// Emit edge instances for finalized vertical runs of identical intervals.
-void HexViewRhiRenderer::emitEdgeRuns(const std::unordered_map<uint32_t, EdgeRun>& runs,
-                                      const SelectionBuildContext& ctx,
-                                      float edgePad,
-                                      const QVector4D& edgeColor) {
-  for (const auto& [ignoredKey, run] : runs) {
-    (void) ignoredKey;
-    const int length = run.endCol - run.startCol;
-    if (length <= 0) {
-      continue;
+  auto emitEdgeRun = [&](const EdgeRun& run) {
+    const int spanLen = run.endCol - run.startCol;
+    if (spanLen <= 0) {
+      return;
     }
-
     const float runY = run.startLine * ctx.lineHeight;
     const float runH = (run.endLine - run.startLine + 1) * ctx.lineHeight;
     const float hexX = ctx.hexStartX + run.startCol * 3.0f * ctx.charWidth;
-    appendEdgeRect(m_edgeRectInstances, hexX, runY, length * 3.0f * ctx.charWidth, runH,
-                   edgePad, edgeColor);
+    appendEdgeRect(m_edgeRectInstances,
+                   hexX,
+                   runY,
+                   spanLen * 3.0f * ctx.charWidth,
+                   runH,
+                   edgePad,
+                   edgeColor);
     if (ctx.shouldDrawAscii) {
       const float asciiX = ctx.asciiStartX + run.startCol * ctx.charWidth;
-      appendEdgeRect(m_edgeRectInstances, asciiX, runY, length * ctx.charWidth, runH,
-                     edgePad, edgeColor);
+      appendEdgeRect(m_edgeRectInstances,
+                     asciiX,
+                     runY,
+                     spanLen * ctx.charWidth,
+                     runH,
+                     edgePad,
+                     edgeColor);
     }
-  }
-}
+  };
 
-// Build mask and edge geometry for a selection set across the visible range.
-void HexViewRhiRenderer::appendMaskForSelections(
-    const std::vector<HexViewFrame::SelectionRange>& selections,
-                                                 const SelectionBuildContext& ctx,
-                                                 float padX,
-                                                 float padY,
-                                                 float edgePad,
-                                                 const QVector4D& maskColor,
-                                                 const QVector4D& edgeColor) {
-  std::vector<std::vector<Interval>> perLine;
-  collectIntervalsForSelections(selections, ctx, perLine);
+  auto intervalKey = [&](int startCol, int endCol) -> int {
+    return (startCol * kIntervalCoordCount) + endCol;
+  };
 
-  std::unordered_map<uint32_t, EdgeRun> activeRuns;
+  std::array<EdgeRun, kIntervalKeyCount> activeRuns{};
+  std::array<uint8_t, kIntervalKeyCount> activeRunMask{};
+
   for (int line = ctx.startLine; line <= ctx.endLine; ++line) {
-    auto& intervals = perLine[static_cast<size_t>(line - ctx.startLine)];
-    const std::vector<Interval> merged = mergeIntervals(intervals);
-    appendMaskRectsForIntervals(merged, line, ctx, padX, padY, maskColor);
+    const size_t lineIndex = static_cast<size_t>(line - ctx.startLine);
+    const uint16_t maskBits = lineMasks[lineIndex];
+    std::array<uint8_t, kIntervalKeyCount> lineRunMask{};
+
+    int col = 0;
+    while (col < kBytesPerLine) {
+      while (col < kBytesPerLine &&
+             (maskBits & static_cast<uint16_t>(1u << col)) == 0u) {
+        ++col;
+      }
+      if (col >= kBytesPerLine) {
+        break;
+      }
+      const int startCol = col;
+      while (col < kBytesPerLine &&
+             (maskBits & static_cast<uint16_t>(1u << col)) != 0u) {
+        ++col;
+      }
+      const int endCol = col;
+      appendMaskSpan(line, startCol, endCol);
+
+      if (edgePad > 0.0f) {
+        const int key = intervalKey(startCol, endCol);
+        lineRunMask[static_cast<size_t>(key)] = 1;
+        if (activeRunMask[static_cast<size_t>(key)] != 0) {
+          activeRuns[static_cast<size_t>(key)].endLine = line;
+        } else {
+          activeRunMask[static_cast<size_t>(key)] = 1;
+          activeRuns[static_cast<size_t>(key)] = EdgeRun{startCol, endCol, line, line};
+        }
+      }
+    }
 
     if (edgePad <= 0.0f) {
       continue;
     }
 
-    std::unordered_map<uint32_t, EdgeRun> nextRuns;
-    // Coalesce identical intervals across adjacent lines into vertical runs.
-    // This keeps edge geometry compact when selections span many rows.
-    for (const auto& interval : merged) {
-      const uint32_t key = (static_cast<uint32_t>(interval.start) << 16) | static_cast<uint32_t>(interval.end);
-      auto it = activeRuns.find(key);
-      if (it != activeRuns.end()) {
-        EdgeRun run = it->second;
-        run.endLine = line;
-        nextRuns.emplace(key, run);
-        activeRuns.erase(it);
-      } else {
-        nextRuns.emplace(key, EdgeRun{interval.start, interval.end, line, line});
+    for (int key = 0; key < kIntervalKeyCount; ++key) {
+      const size_t keyIndex = static_cast<size_t>(key);
+      if (activeRunMask[keyIndex] != 0 && lineRunMask[keyIndex] == 0) {
+        emitEdgeRun(activeRuns[keyIndex]);
+        activeRunMask[keyIndex] = 0;
       }
     }
-
-    emitEdgeRuns(activeRuns, ctx, edgePad, edgeColor);
-    activeRuns = std::move(nextRuns);
   }
 
   if (edgePad > 0.0f) {
-    emitEdgeRuns(activeRuns, ctx, edgePad, edgeColor);
+    for (int key = 0; key < kIntervalKeyCount; ++key) {
+      const size_t keyIndex = static_cast<size_t>(key);
+      if (activeRunMask[keyIndex] != 0) {
+        emitEdgeRun(activeRuns[keyIndex]);
+      }
+    }
   }
 }
 
@@ -1470,6 +1544,61 @@ void HexViewRhiRenderer::buildSelectionInstances(int startLine, int endLine,
   const float glowBase = std::max(0.0f, static_cast<float>(frame.playbackGlowRadius)) *
                          std::max(1.0f, std::min(charWidth, lineHeight));
   const float glowPad = glowBase * 1.35f;
+  auto appendMaskForRangeNoEdge =
+      [&](const HexViewFrame::SelectionRange& range, const QVector4D& maskColor) {
+        if (range.length == 0) {
+          return;
+        }
+        int selectionStart = static_cast<int>(range.offset - ctx.fileBaseOffset);
+        int selectionEnd = selectionStart + static_cast<int>(range.length);
+        if (selectionEnd <= 0 || selectionStart >= static_cast<int>(ctx.fileLength)) {
+          return;
+        }
+        selectionStart = std::max(selectionStart, 0);
+        selectionEnd = std::min(selectionEnd, static_cast<int>(ctx.fileLength));
+        if (selectionEnd <= selectionStart) {
+          return;
+        }
+
+        const int selStartLine = selectionStart / kBytesPerLine;
+        const int selEndLine = (selectionEnd - 1) / kBytesPerLine;
+        const int lineStart = std::max(ctx.startLine, selStartLine);
+        const int lineEnd = std::min(ctx.endLine, selEndLine);
+
+        for (int line = lineStart; line <= lineEnd; ++line) {
+          const CachedLine* entry = cachedLineFor(line);
+          if (!entry || entry->bytes <= 0) {
+            continue;
+          }
+          const int lineOffset = line * kBytesPerLine;
+          const int startCol = (line == selStartLine) ? (selectionStart - lineOffset) : 0;
+          const int endCol = (line == selEndLine) ? (selectionEnd - lineOffset) : entry->bytes;
+          const int clampedStart = std::clamp(startCol, 0, entry->bytes);
+          const int clampedEnd = std::clamp(endCol, 0, entry->bytes);
+          const int spanLen = clampedEnd - clampedStart;
+          if (spanLen <= 0) {
+            continue;
+          }
+
+          const float y = line * ctx.lineHeight;
+          const float hexX = ctx.hexStartX + clampedStart * 3.0f * ctx.charWidth;
+          appendRect(m_maskRectInstances,
+                     hexX,
+                     y,
+                     spanLen * 3.0f * ctx.charWidth,
+                     ctx.lineHeight,
+                     maskColor);
+          if (ctx.shouldDrawAscii) {
+            const float asciiX = ctx.asciiStartX + clampedStart * ctx.charWidth;
+            appendRect(m_maskRectInstances,
+                       asciiX,
+                       y,
+                       spanLen * ctx.charWidth,
+                       ctx.lineHeight,
+                       maskColor);
+          }
+        }
+      };
 
   if (hasSelection) {
     const std::vector<HexViewFrame::SelectionRange>& selections =
@@ -1498,14 +1627,12 @@ void HexViewRhiRenderer::buildSelectionInstances(int startLine, int endLine,
     const QVector4D playbackEdgeColor(0.0f, 0.0f, 1.0f, 0.0f);
     appendMaskForSelections(fadeRanges, ctx, 0.0f, 0.0f, glowPad, playbackMaskColor,
                             playbackEdgeColor);
-    const QVector4D fadeEdgeColor(0.0f, 0.0f, 0.0f, 0.0f);
     for (const auto& selection : frame.fadePlaybackSelections) {
       if (selection.alpha <= 0.0f) {
         continue;
       }
       const QVector4D fadeMaskColor(0.0f, 0.0f, 1.0f, selection.alpha);
-      const std::vector<HexViewFrame::SelectionRange> one{selection.range};
-      appendMaskForSelections(one, ctx, 0.0f, 0.0f, 0.0f, fadeMaskColor, fadeEdgeColor);
+      appendMaskForRangeNoEdge(selection.range, fadeMaskColor);
     }
   }
 }

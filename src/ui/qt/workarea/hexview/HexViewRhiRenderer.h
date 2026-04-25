@@ -10,7 +10,6 @@
 #include <QSize>
 #include <array>
 #include <cstdint>
-#include <unordered_map>
 #include <vector>
 
 #include "HexViewFrameData.h"
@@ -117,16 +116,6 @@ private:
     uint32_t glyphStart = 0;
     uint32_t glyphCount = 0;
   };
-  struct Interval {
-    int start = 0;
-    int end = 0;
-  };
-  struct EdgeRun {
-    int startCol = 0;
-    int endCol = 0;
-    int startLine = 0;
-    int endLine = 0;
-  };
   struct SelectionBuildContext {
     // Visible range and geometry needed when converting byte selections into
     // GPU rect instances for both hex and ASCII columns.
@@ -166,15 +155,6 @@ private:
                       const HexViewFrame::Data& frame, const LayoutMetrics& layout);
   bool ensureInstanceBuffer(QRhiBuffer*& buffer, int bytes);
   void updateInstanceBuffers(QRhiResourceUpdateBatch* u);
-  void drawRectBuffer(QRhiCommandBuffer* cb, QRhiBuffer* buffer, int count,
-                      int firstInstance = 0, QRhiShaderResourceBindings* srb = nullptr,
-                      QRhiGraphicsPipeline* pso = nullptr);
-  void drawEdgeBuffer(QRhiCommandBuffer* cb, QRhiBuffer* buffer, int count,
-                      int firstInstance = 0, QRhiShaderResourceBindings* srb = nullptr,
-                      QRhiGraphicsPipeline* pso = nullptr);
-  void drawGlyphBuffer(QRhiCommandBuffer* cb, QRhiBuffer* buffer, int count, int firstInstance = 0);
-  void drawFullscreen(QRhiCommandBuffer* cb, QRhiGraphicsPipeline* pso,
-                      QRhiShaderResourceBindings* srb);
 
   QRectF glyphUv(const QChar& ch, const HexViewFrame::Data& frame) const;
   void appendRect(std::vector<RectInstance>& rects, float x, float y, float w, float h,
@@ -188,20 +168,6 @@ private:
                          const HexViewFrame::Data& frame);
   void rebuildCacheWindow(const HexViewFrame::Data& frame);
   const CachedLine* cachedLineFor(int line) const;
-  void collectIntervalsForSelections(const std::vector<HexViewFrame::SelectionRange>& selections,
-                                     const SelectionBuildContext& ctx,
-                                     std::vector<std::vector<Interval>>& perLine) const;
-  static std::vector<Interval> mergeIntervals(std::vector<Interval>& intervals);
-  void appendMaskRectsForIntervals(const std::vector<Interval>& intervals,
-                                   int line,
-                                   const SelectionBuildContext& ctx,
-                                   float padX,
-                                   float padY,
-                                   const QVector4D& maskColor);
-  void emitEdgeRuns(const std::unordered_map<uint32_t, EdgeRun>& runs,
-                    const SelectionBuildContext& ctx,
-                    float edgePad,
-                    const QVector4D& edgeColor);
   void appendMaskForSelections(const std::vector<HexViewFrame::SelectionRange>& selections,
                                const SelectionBuildContext& ctx,
                                float padX,
@@ -240,6 +206,7 @@ private:
   QRhiBuffer* m_compositeUbuf = nullptr;
   QRhiTexture* m_glyphTex = nullptr;
   QRhiTexture* m_itemIdTex = nullptr;
+  QRhiTexture* m_edgeFallbackTex = nullptr;
   QRhiSampler* m_glyphSampler = nullptr;
   QRhiSampler* m_maskSampler = nullptr;
   QRhiShaderResourceBindings* m_rectSrb = nullptr;
@@ -251,6 +218,8 @@ private:
   QRhiGraphicsPipeline* m_maskPso = nullptr;
   QRhiGraphicsPipeline* m_edgePso = nullptr;
   QRhiGraphicsPipeline* m_compositePso = nullptr;
+  QRhiGraphicsPipeline* m_outputRectPso = nullptr;
+  QRhiGraphicsPipeline* m_outputGlyphPso = nullptr;
   int m_sampleCount = 1;
   uint64_t m_glyphAtlasVersion = 0;
   bool m_staticBuffersUploaded = false;
@@ -275,6 +244,8 @@ private:
   bool m_baseBufferDirty = false;
   bool m_selectionBufferDirty = false;
   bool m_itemIdDirty = true;
+  bool m_edgeFallbackDirty = true;
+  bool m_useEdgeFallback = true;
   bool m_outlineEnabled = false;
   float m_outlineAlpha = 0.0f;
   float m_lastFrameSeconds = 0.0f;

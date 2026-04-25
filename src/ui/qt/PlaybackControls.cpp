@@ -16,6 +16,7 @@
 #include "SequencePlayer.h"
 #include "SeekBar.h"
 #include "UIHelpers.h"
+#include "ColorHelpers.h"
 
 namespace {
 constexpr int kTransportControlHeight = 32;
@@ -23,10 +24,8 @@ constexpr int kTransportButtonSize = 32;
 constexpr int kTransportIconSize = 28;
 constexpr int kSeekBarVisibleWidthThreshold = 125;
 constexpr int kInactiveTransportIconAlpha = 120;
-const QColor kDarkPlayColor(0x2f, 0xbf, 0x71);
-const QColor kLightPlayColor(0x24, 0x96, 0x59);
-const QColor kDarkStopColor(0xd8, 0x6b, 0x6b);
-const QColor kLightStopColor(0xb8, 0x4f, 0x4f);
+const QColor kPlayColor(0x2f, 0xbf, 0x71);
+const QColor kStopColor(0xd8, 0x6b, 0x6b);
 
 QIcon gradientTransportIcon(const QString &iconPath, QColor baseColor) {
   const int alpha = baseColor.alpha();
@@ -47,9 +46,6 @@ PlaybackControls::PlaybackControls(QWidget *parent) : QWidget(parent) {
 
 void PlaybackControls::setupControls() {
   auto *barLayout = static_cast<QHBoxLayout *>(layout());
-  const bool darkPalette = isDarkPalette(palette());
-  const QColor playColor = darkPalette ? kDarkPlayColor : kLightPlayColor;
-  const QColor stopColor = darkPalette ? kDarkStopColor : kLightStopColor;
   const QString buttonStyle = toolBarButtonStyle(palette());
 
   auto *buttonGroup = new QWidget(this);
@@ -72,7 +68,7 @@ void PlaybackControls::setupControls() {
     return button;
   };
 
-  m_play = makeButton(QStringLiteral(":/icons/play.svg"), QStringLiteral("Play selected collection (Space)"), playColor);
+  m_play = makeButton(QStringLiteral(":/icons/play.svg"), QStringLiteral("Play selected collection (Space)"), kPlayColor);
   m_play->setEnabled(false);
   m_play->setWhatsThis("Select a collection in the panel above and click this \u25b6 button or press 'Space' to play it.\n"
                        "Clicking the button again will pause playback or play a different collection "
@@ -80,7 +76,7 @@ void PlaybackControls::setupControls() {
   connect(m_play, &QToolButton::pressed, this, &PlaybackControls::playToggle);
   buttonGroupLayout->addWidget(m_play);
 
-  m_stop = makeButton(QStringLiteral(":/icons/stop.svg"), QStringLiteral("Stop playback (Esc)"), stopColor);
+  m_stop = makeButton(QStringLiteral(":/icons/stop.svg"), QStringLiteral("Stop playback (Esc)"), kStopColor);
   m_stop->setEnabled(false);
   connect(m_stop, &QToolButton::pressed, this, &PlaybackControls::stopPressed);
   buttonGroupLayout->addWidget(m_stop);
@@ -169,11 +165,10 @@ void PlaybackControls::playerStatusChanged(bool playing) {
   m_skipNextPlaybackSliderUpdate = false;
   const bool hasActive = SequencePlayer::the().activeCollection() != nullptr;
   const bool canPlay = m_hasSelectedCollection || hasActive;
-  const bool darkPalette = isDarkPalette(palette());
 
   m_play->setEnabled(canPlay);
 
-  QColor playColor = darkPalette ? kDarkPlayColor : kLightPlayColor;
+  QColor playColor = kPlayColor;
   if (!(playing || canPlay)) {
     playColor.setAlpha(kInactiveTransportIconAlpha);
   }
@@ -181,7 +176,7 @@ void PlaybackControls::playerStatusChanged(bool playing) {
                                                 : QStringLiteral(":/icons/play.svg"),
                                         playColor));
 
-  QColor stopColor = darkPalette ? kDarkStopColor : kLightStopColor;
+  QColor stopColor = kStopColor;
   m_stop->setEnabled(hasActive);
   if (!m_stop->isEnabled()) {
     stopColor.setAlpha(kInactiveTransportIconAlpha);

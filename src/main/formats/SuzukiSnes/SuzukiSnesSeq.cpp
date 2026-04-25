@@ -1,4 +1,5 @@
 #include "SuzukiSnesSeq.h"
+#include "SuzukiSnesInstr.h"
 #include "spdlog/fmt/fmt.h"
 
 DECLARE_FORMAT(SuzukiSnes);
@@ -42,10 +43,7 @@ bool SuzukiSnesSeq::parseHeader() {
   setPPQN(SEQ_PPQN);
 
   VGMHeader *header = addHeader(offset(), 0);
-  uint32_t curOffset = offset();
-
-  // skip unknown stream
-  if (version != SUZUKISNES_SD3) {
+  auto addDrumKitChildren = [this, header](uint32_t &curOffset) -> bool {
     while (true) {
       if (curOffset + 1 >= 0x10000) {
         return false;
@@ -53,33 +51,53 @@ bool SuzukiSnesSeq::parseHeader() {
 
       uint8_t firstByte = readByte(curOffset);
       if (firstByte >= 0x80) {
-        header->addChild(curOffset, 1, "Unknown Items End");
+        header->addChild(curOffset, 1, "Drum Kit End");
         curOffset++;
         break;
       }
-      else {
-        header->addUnknownChild(curOffset, 5);
-        curOffset += 5;
+      auto drum = header->addChild(curOffset, 5, "Drum Instrument");
+      drum->addChild(curOffset++, 1, "Note Index");
+      drum->addChild(curOffset++, 1, "Base Instrument");
+      drum->addChild(curOffset++, 1, "Unity Key");
+      drum->addChild(curOffset++, 1, "Volume");
+      drum->addChild(curOffset++, 1, "Pan");
+    }
+
+    return true;
+  };
+
+  auto addTrackPointerChildren = [this, header](uint32_t curOffset) {
+    for (int trackIndex = 0; trackIndex < MAX_TRACKS; trackIndex++) {
+      uint16_t addrTrackStart = readShort(curOffset);
+
+      if (addrTrackStart != 0) {
+        auto trackName = fmt::format("Track Pointer {:d}", trackIndex + 1);
+        header->addChild(curOffset, 2, trackName);
+
+        aTracks.push_back(new SuzukiSnesTrack(this, addrTrackStart));
       }
+      else {
+        // example: Super Mario RPG - Where Am I Going?
+        header->addChild(curOffset, 2, "NULL");
+      }
+
+      curOffset += 2;
+    }
+  };
+
+  if (version == SUZUKISNES_SD3) {
+    addTrackPointerChildren(offset());
+    uint32_t curOffset = offset() + MAX_TRACKS * 2;
+    if (!addDrumKitChildren(curOffset)) {
+      return false;
     }
   }
-
-  // create tracks
-  for (int trackIndex = 0; trackIndex < MAX_TRACKS; trackIndex++) {
-    uint16_t addrTrackStart = readShort(curOffset);
-
-    if (addrTrackStart != 0) {
-      auto trackName = fmt::format("Track Pointer {:d}", trackIndex + 1);
-      header->addChild(curOffset, 2, trackName);
-
-      aTracks.push_back(new SuzukiSnesTrack(this, addrTrackStart));
+  else {
+    uint32_t curOffset = offset();
+    if (!addDrumKitChildren(curOffset)) {
+      return false;
     }
-    else {
-      // example: Super Mario RPG - Where Am I Going?
-      header->addChild(curOffset, 2, "NULL");
-    }
-
-    curOffset += 2;
+    addTrackPointerChildren(curOffset);
   }
 
   header->setGuessedLength();
@@ -212,6 +230,8 @@ void SuzukiSnesTrack::resetVars() {
   spcVolume = 100;
   loopLevel = 0;
   infiniteLoopPoint = 0;
+  percussion = false;
+  nonPercussionProgram = 0;
 }
 
 bool SuzukiSnesTrack::readEvent() {
@@ -293,9 +313,11 @@ bool SuzukiSnesTrack::readEvent() {
       if (noteIndex < 12) {
         uint8_t note = octave * 12 + noteIndex;
 
-        // TODO: percussion note
-
-        addNoteByDur(beginOffset, curOffset - beginOffset, note, NOTE_VELOCITY, dur);
+        if (percussion) {
+          addNoteByDur(beginOffset, curOffset - beginOffset, noteIndex + SuzukiSnesDrumKitRgn::KEY_BIAS - transpose, NOTE_VELOCITY, dur, "Percussion Note with Duration");
+        } else {
+          addNoteByDur(beginOffset, curOffset - beginOffset, note, NOTE_VELOCITY, dur);
+        }
         addTime(dur);
       }
       else if (noteIndex == 13) {
@@ -558,6 +580,7 @@ bool SuzukiSnesTrack::readEvent() {
     case EVENT_PROGCHANGE: {
       uint8_t newProg = readByte(curOffset++);
       addProgramChange(beginOffset, curOffset - beginOffset, newProg);
+      nonPercussionProgram = newProg;
       break;
     }
 
@@ -661,11 +684,15 @@ bool SuzukiSnesTrack::readEvent() {
 
     case EVENT_PERC_ON: {
       addGenericEvent(beginOffset, curOffset - beginOffset, "Percussion On", desc, Type::UseDrumKit);
+      percussion = true;
+      addProgramChangeNoItem(SuzukiSnesInstrSet::DRUMKIT_PROGRAM, true);
       break;
     }
 
     case EVENT_PERC_OFF: {
       addGenericEvent(beginOffset, curOffset - beginOffset, "Percussion Off", desc, Type::UseDrumKit);
+      percussion = false;
+      addProgramChangeNoItem(nonPercussionProgram, true);
       break;
     }
 
