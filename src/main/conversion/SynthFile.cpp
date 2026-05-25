@@ -94,6 +94,40 @@ SynthRgn *SynthInstr::addRgn(const SynthRgn& rgn) {
   return vRgns.back();
 }
 
+void SynthInstr::addModulator(const SynthModulator& modulator) {
+  m_modulators.push_back(modulator);
+}
+
+// Add a modulator using a specific ModSource. This will bypass the ModDest->ModSource mapping in ConversionOptions
+void SynthInstr::addModulator(ModSource source, ModDest destination, ModAmount amount) {
+  if (!amount.valid()) {
+    return;
+  }
+
+  m_modulators.emplace_back(source, destination, amount.value());
+}
+
+// Add a modulator without specifying the ModSource. The ModDest->ModSource mapping in ConversionOptions will be used
+void SynthInstr::addModulator(ModDest destination, ModAmount amount) {
+  if (!amount.valid()) {
+    return;
+  }
+
+  m_modulators.emplace_back(destination, amount.value());
+}
+
+void SynthInstr::addGenerator(const SynthGenerator& generator) {
+  m_generators.push_back(generator);
+}
+
+void SynthInstr::addGenerator(ModDest destination, ModAmount amount) {
+  if (!amount.valid()) {
+    return;
+  }
+
+  m_generators.push_back({destination, amount.value()});
+}
+
 //  ********
 //  SynthRgn
 //  ********

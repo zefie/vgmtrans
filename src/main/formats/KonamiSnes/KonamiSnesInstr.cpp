@@ -5,7 +5,10 @@
  */
 
 #include "KonamiSnesInstr.h"
+#include "KonamiSnesSeq.h"
+#include "KonamiSnesVibrato.h"
 #include "SNESDSP.h"
+#include "VGMColl.h"
 #include <algorithm>
 #include <spdlog/fmt/fmt.h>
 
@@ -26,6 +29,25 @@ constexpr bool usesLegacyPanRange(KonamiSnesVersion version) {
   return version == KONAMISNES_V1 || version == KONAMISNES_V2;
 }
 
+constexpr uint8_t percussionPanLimit(KonamiSnesVersion version) {
+  return usesLegacyPanRange(version) ? 0x14 : 0x28;
+}
+
+// Rewrites the shared vibrato modulators to the sequence-specific maxima collected on the first
+// pass, while keeping the controller mapping itself identical across instrument loads.
+void applyVibratoExportScaling(KonamiSnesInstrSet* instrSet, uint8_t maxDepth, uint16_t maxRateFactor) {
+  const auto spec = konami_snes::vibrato::modulationSpec(instrSet->version, maxDepth, maxRateFactor);
+  for (auto* instr : instrSet->exportInstrs()) {
+    instr->updateStandardVibratoHandling(spec);
+  }
+}
+
+int getPercussionKey(RawFile *file, uint32_t addrInstrHeader) {
+  const int8_t rawKey = file->readByte(addrInstrHeader + 1);
+  const int8_t tuning = file->readByte(addrInstrHeader + 2);
+  return (tuning >= 0) ? rawKey : (rawKey - 1);
+}
+
 // Legacy percussion tables can be shorter than the nominal 0x60 slots. Clamp the scan
 // to entries that still look like sane drum definitions so we do not run into SPC code.
 bool isValidPercussionHeader(RawFile *file,
@@ -39,7 +61,7 @@ bool isValidPercussionHeader(RawFile *file,
   const bool legacyLayout = usesLegacyInstrumentLayout(version);
   const uint8_t pan = file->readByte(addrInstrHeader + (legacyLayout ? 6 : 5));
   const uint8_t vol = file->readByte(addrInstrHeader + (legacyLayout ? 7 : 6));
-  return pan <= (usesLegacyPanRange(version) ? 0x14 : 0x28) && vol <= 0x7f;
+  return pan <= percussionPanLimit(version) && vol <= 0x7f;
 }
 
 std::vector<PercussionHeader> collectPercussionHeaders(RawFile *file,
@@ -51,10 +73,21 @@ std::vector<PercussionHeader> collectPercussionHeaders(RawFile *file,
   const uint32_t instrItemSize = KonamiSnesInstr::expectedSize(version);
   for (uint8_t percussionNote = 0; percussionNote < kKonamiSnesPercussionNoteCount; percussionNote++) {
     const uint32_t addrInstrHeader = tableOffset + (instrItemSize * percussionNote);
+    if (addrInstrHeader + instrItemSize > 0x10000) {
+      break;
+    }
+
     if (!isValidPercussionHeader(file, version, addrInstrHeader, spcDirAddr)) {
-      // Some games leave unused slots at the front, but once real drum entries start,
-      // the first invalid header means we have walked past the table.
-      if (!headers.empty()) {
+      const bool legacyLayout = usesLegacyInstrumentLayout(version);
+      const uint8_t pan = file->readByte(addrInstrHeader + (legacyLayout ? 6 : 5));
+      // Bad SRCNs can appear inside a real drum table, but once pan goes out of range
+      // or the key on a bad header becomes implausible, we have likely hit non-table data.
+      if (pan > percussionPanLimit(version)) {
+        break;
+      }
+      const int key = getPercussionKey(file, addrInstrHeader);
+      if (!KonamiSnesInstr::isValidHeader(file, version, addrInstrHeader, spcDirAddr, true) &&
+          (key < -40 || key > 40)) {
         break;
       }
       continue;
@@ -142,9 +175,9 @@ bool KonamiSnesInstrSet::parseInstrPointers() {
     aInstrs.push_back(newInstr);
   }
 
-  const auto percussionHeaders =
-      collectPercussionHeaders(this->rawFile(), version, percInstrOffset, spcDirAddr);
+  const auto percussionHeaders = collectPercussionHeaders(this->rawFile(), version, percInstrOffset, spcDirAddr);
   for (const auto &header : percussionHeaders) {
+    // The first byte of the percussion instr data is the sample index
     addUsedSRCN(readByte(header.offset));
   }
   if (!percussionHeaders.empty()) {
@@ -155,7 +188,7 @@ bool KonamiSnesInstrSet::parseInstrPointers() {
                                          DRUMKIT_PROGRAM & 0x7f,
                                          spcDirAddr,
                                          true,
-                                         "Percussions");
+                                         "Percussion");
     aInstrs.push_back(newInstr);
   }
 
@@ -171,6 +204,27 @@ bool KonamiSnesInstrSet::parseInstrPointers() {
   }
 
   return true;
+}
+
+void KonamiSnesInstrSet::useColl(const VGMColl* coll) {
+  uint8_t maxVibratoDepth = konami_snes::kDefaultVibratoMaxDepth;
+  uint16_t maxVibratoRateFactor = konami_snes::vibrato::defaultMaxRateFactor(version);
+
+  if (coll != nullptr && coll->seq() != nullptr) {
+    const auto* seq = dynamic_cast<const KonamiSnesSeq*>(coll->seq());
+    if (seq != nullptr && seq->rawFile() == rawFile() && seq->version == version) {
+      maxVibratoDepth = seq->maxVibratoDepth;
+      maxVibratoRateFactor = seq->maxVibratoRateFactor;
+    }
+  }
+
+  applyVibratoExportScaling(this, maxVibratoDepth, maxVibratoRateFactor);
+}
+
+void KonamiSnesInstrSet::unuseColl() {
+  applyVibratoExportScaling(this,
+                            konami_snes::kDefaultVibratoMaxDepth,
+                            konami_snes::vibrato::defaultMaxRateFactor(version));
 }
 
 // ***************
@@ -195,6 +249,8 @@ KonamiSnesInstr::~KonamiSnesInstr() {
 }
 
 bool KonamiSnesInstr::loadInstr() {
+  addStandardVibratoHandling(konami_snes::vibrato::modulationSpec(version));
+
   if (percussion) {
     const auto percussionHeaders = collectPercussionHeaders(rawFile(), version, offset(), spcDirAddr);
     for (const auto &header : percussionHeaders) {

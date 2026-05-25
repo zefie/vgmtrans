@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -12,6 +13,7 @@
 #include <vector>
 #include "VGMItem.h"
 #include "VGMSeq.h"
+#include "Modulation.h"
 #include <spdlog/common.h>
 #include "LogManager.h"
 #include "SynthType.h"
@@ -19,6 +21,13 @@
 class VGMSeq;
 class SeqEvent;
 class MidiTrack;
+class SeqSynthLfoAutomation;
+template <typename ValueType>
+struct SeqMotionPlan;
+template <typename ValueType>
+struct SeqMotionTick;
+template <typename PitchType>
+class SeqPitchBendAutomation;
 
 enum ReadMode : uint8_t;
 
@@ -90,6 +99,9 @@ class SeqTrack : public VGMItem {
 protected:
   virtual void resetVars();
   void resetVisitedAddresses();
+  void resetSegmentVars();
+  void loadTrackSegmentInit(uint32_t segmentOffset, uint32_t segmentLength, bool segmentActive,
+                            uint32_t initialOffset);
 
   virtual void setChannelAndGroupFromTrkNum(int theTrackNum);
   virtual void addInitialMidiEvents(int trackNum);
@@ -106,6 +118,13 @@ protected:
 
   virtual bool onEvent(uint32_t offset, uint32_t length);
   virtual SeqEvent* addEvent(SeqEvent *pSeqEvent);
+  // Some parsers emit SeqEvents under a display track that differs from the parser track.
+  void setSeqEventTarget(SeqTrack* target, bool emitEvents = true) {
+    m_seqEventTarget = target;
+    m_emitSeqEvents = emitEvents;
+  }
+  void clearSeqEventTarget() { setSeqEventTarget(nullptr); }
+  SeqTrack* seqEventTarget() { return m_seqEventTarget != nullptr ? m_seqEventTarget : this; }
 
   template <typename EventType, typename... Args>
   void recordSeqEvent(bool isNewOffset, uint32_t startTick, Args&&... args) {
@@ -118,13 +137,17 @@ protected:
                                              uint32_t duration,
                                              Args&&... args) {
     if (readMode == READMODE_ADD_TO_UI) {
-      if (isNewOffset) {
-        addEvent(new EventType(this, std::forward<Args>(args)...));
+      if (isNewOffset && m_emitSeqEvents) {
+        auto* target = seqEventTarget();
+        auto* event = new EventType(target, std::forward<Args>(args)...);
+        event->channel = static_cast<uint8_t>(channel);
+        target->addEvent(event);
       }
       return SeqEventTimeIndex::kInvalidIndex;
     }
     if (readMode == READMODE_CONVERT_TO_MIDI) {
-      if (SeqEvent* existing = findSeqEventAtOffset(m_lastEventOffset, m_lastEventLength)) {
+      if (SeqEvent* existing =
+              seqEventTarget()->findSeqEventAtOffset(m_lastEventOffset, m_lastEventLength)) {
         return parentSeq->timedEventIndex().addEvent(existing, startTick, duration);
       }
     }
@@ -138,10 +161,45 @@ protected:
   bool popReturnOffset(uint32_t &returnOffset);
   SeqEvent* findSeqEventAtOffset(uint32_t offset, uint32_t length);
 
+  template <typename PitchType>
+  SeqMotionTick<PitchType> advancePitchBendAutomation(SeqPitchBendAutomation<PitchType>& automation);
+  template <typename PitchType>
+  bool beginPitchBendAutomation(SeqPitchBendAutomation<PitchType>& automation,
+                                const SeqMotionPlan<PitchType>& motion, uint16_t rangeCents,
+                                uint16_t defaultRangeCents,
+                                bool applyInitialBend = false);
+  template <typename PitchType>
+  bool setPitchBendAutomationRange(SeqPitchBendAutomation<PitchType>& automation, uint16_t cents);
+  template <typename PitchType>
+  bool setPitchBendAutomationBend(SeqPitchBendAutomation<PitchType>& automation, int16_t bend);
+  template <typename PitchType>
+  bool applyPitchBendAutomation(SeqPitchBendAutomation<PitchType>& automation);
+  template <typename PitchType>
+  void resetPitchBendAutomation(SeqPitchBendAutomation<PitchType>& automation, uint16_t defaultRangeCents);
+  bool emitVibratoDepth(SeqSynthLfoAutomation& automation, uint8_t depth, bool force = false);
+  bool emitTremoloDepth(SeqSynthLfoAutomation& automation, uint8_t depth, bool force = false);
+  template <typename ConvertDepth>
+  SeqMotionTick<int32_t> advanceVibratoDepthFade(SeqSynthLfoAutomation& automation,
+                                                 uint8_t fractionalBits,
+                                                 ConvertDepth&& convertDepth);
+  template <typename ConvertDepth>
+  SeqMotionTick<int32_t> advanceTremoloDepthFade(SeqSynthLfoAutomation& automation,
+                                                 uint8_t fractionalBits,
+                                                 ConvertDepth&& convertDepth);
+
 private:
   void addControllerSlide(u32 dur, u16 &prevVal, u16 targVal, uint8_t (*scalerFunc)(uint8_t), void (MidiTrack::*insertFunc)(uint8_t, uint8_t, uint32_t)) const;
-  double applyLevelCorrection(double level, LevelController controller) const;
+  void addForModSourceNoItem(ModSource source, uint8_t value) const;
+  void addForModDestNoItem(ModDest destination, uint8_t value) const;
+  void addLfoModulationEvent(ModDest destination,
+                             uint32_t offset,
+                             uint32_t length,
+                             uint8_t value,
+                             const std::string& eventName,
+                             Type type);
+  double applyPanVolumeCorrection(double level, LevelController controller) const;
   void addLevelNoItem(double level, LevelController controller, Resolution res, int absTime = -1);
+  void reapplyStoredLevelNoItem(LevelController controller, int absTime = -1);
   void purgePrevDurEvents(uint32_t absTime);
   void clearPrevDurEvents();
   void trackActiveNoteIndex(int8_t key, SeqEventTimeIndex::Index idx);
@@ -195,6 +253,7 @@ private:
   void insertExpression(uint32_t offset, uint32_t length, uint8_t level, uint32_t absTime, const std::string &sEventName = "Expression");
   void insertExpressionNoItem(uint8_t level, uint32_t absTime);
   void addMasterVol(uint32_t offset, uint32_t length, uint8_t vol, const std::string &sEventName = "Master Volume");
+  void addMasterVol(uint32_t offset, uint32_t length, double volPercent, Resolution res, const std::string &sEventName = "Master Volume");
   void addMasterVolNoItem(uint8_t newVol);
   void addMastVolSlide(uint32_t offset, uint32_t length, uint32_t dur, uint8_t targVol, const std::string &sEventName = "Master Volume Slide");
 
@@ -208,8 +267,12 @@ private:
   void insertReverb(uint32_t offset, uint32_t length, uint8_t reverb, uint32_t absTime, const std::string &sEventName = "Reverb");
   void addPitchBend(uint32_t offset, uint32_t length, int16_t bend, const std::string &sEventName = "Pitch Bend");
   void addPitchBendAsPercent(uint32_t offset, uint32_t length, double percent, const std::string &sEventName = "Pitch Bend");
+  void addPitchBendNoItem(int16_t bend) const;
   void addPitchBendRange(uint32_t offset, uint32_t length, uint16_t cents, const std::string &sEventName = "Pitch Bend Range");
   void addPitchBendRangeNoItem(uint16_t cents) const;
+  void addChannelPressure(uint32_t offset, uint32_t length, uint8_t pressure, const std::string &sEventName = "Channel Pressure");
+  void addChannelPressureNoItem(uint8_t pressure);
+  void insertChannelPressure(uint32_t offset, uint32_t length, uint8_t pressure, uint32_t absTime, const std::string &sEventName = "Channel Pressure");
   void addFineTuning(uint32_t offset, uint32_t length, double cents, const std::string &sEventName = "Fine Tuning");
   void addFineTuningNoItem(double cents);
   void addCoarseTuning(uint32_t offset, uint32_t length, double semitones, const std::string &sEventName = "Coarse Tuning");
@@ -224,6 +287,18 @@ private:
   void addBreath(uint32_t offset, uint32_t length, uint8_t depth, const std::string &sEventName = "Breath Depth");
   void addBreathNoItem(uint8_t depth);
   void insertBreath(uint32_t offset, uint32_t length, uint8_t depth, uint32_t absTime, const std::string &sEventName = "Breath Depth");
+  void addVibratoDepth(uint32_t offset, uint32_t length, uint8_t depth, const std::string& sEventName = "Vibrato Depth");
+  void addVibratoDepthNoItem(uint8_t depth) const;
+  void addVibratoFrequency(uint32_t offset, uint32_t length, uint8_t frequency, const std::string& sEventName = "Vibrato Frequency");
+  void addVibratoFrequencyNoItem(uint8_t frequency) const;
+  void addVibratoDelay(uint32_t offset, uint32_t length, uint8_t delay, const std::string& sEventName = "Vibrato Delay");
+  void addVibratoDelayNoItem(uint8_t delay) const;
+  void addTremoloDepth(uint32_t offset, uint32_t length, uint8_t depth, const std::string& sEventName = "Tremolo Depth");
+  void addTremoloDepthNoItem(uint8_t depth) const;
+  void addTremoloFrequency(uint32_t offset, uint32_t length, uint8_t frequency, const std::string& sEventName = "Tremolo Frequency");
+  void addTremoloFrequencyNoItem(uint8_t frequency) const;
+  void addTremoloDelay(uint32_t offset, uint32_t length, uint8_t delay, const std::string& sEventName = "Tremolo Delay");
+  void addTremoloDelayNoItem(uint8_t delay) const;
 
   void addSustainEvent(uint32_t offset, uint32_t length, uint8_t depth, const std::string &sEventName = "Sustain");
   void insertSustainEvent(uint32_t offset, uint32_t length, uint8_t depth, uint32_t absTime, const std::string &sEventName = "Sustain");
@@ -241,6 +316,7 @@ private:
   void insertPortamentoTime14BitNoItem(uint16_t time, uint32_t absTime) const;
   void addPortamentoControlNoItem(uint8_t key) const;
   void insertPortamentoControlNoItem(uint8_t key, uint32_t absTime) const;
+  void addLegatoPedalNoItem(bool bOn);
   void addProgramChange(uint32_t offset, uint32_t length, uint32_t progNum, const std::string &sEventName = "Program Change");
   void addProgramChange(uint32_t offset, uint32_t length, uint32_t progNum, uint8_t chan, const std::string &sEventName = "Program Change");
   void addProgramChange(uint32_t offset, uint32_t length, uint32_t progNum, bool requireBank, const std::string &sEventName = "Program Change");
@@ -295,8 +371,11 @@ private:
   uint8_t prevVel;
   uint8_t octave;
   u16 vol;
+  Resolution volResolution;
   u16 expression;
+  Resolution expressionResolution;
   u16 mastVol;
+  Resolution masterVolResolution;
   double panVolumeCorrectionRate; // as percentage of original volume (default: 1.0)
   u16 prevPan;
   uint8_t prevReverb;
@@ -326,6 +405,8 @@ private:
 
   uint32_t m_lastEventOffset = 0;
   uint32_t m_lastEventLength = 0;
+  SeqTrack* m_seqEventTarget = nullptr;
+  bool m_emitSeqEvents = true;
 };
 
 template<typename... Args>

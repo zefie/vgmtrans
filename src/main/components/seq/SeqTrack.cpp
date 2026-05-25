@@ -5,12 +5,26 @@
  */
 
 #include "SeqTrack.h"
+
+#include <algorithm>
+#include <cmath>
+
+#include "automation/SeqMidiAutomation.h"
 #include "SeqEvent.h"
 #include "ScaleConversion.h"
 #include "Options.h"
 #include "VGMSeqNoTrks.h"
-#include "helper.h"
-#include <algorithm>
+
+
+namespace {
+constexpr uint16_t maxLevelForResolution(Resolution res) {
+  return res == Resolution::FourteenBit ? 16383 : 127;
+}
+
+double normalizedLevelFromRaw(uint16_t rawLevel, Resolution res) {
+  return rawLevel / static_cast<double>(maxLevelForResolution(res));
+}
+}  // namespace
 
 SeqTrack::SeqTrack(VGMSeq *parentFile, uint32_t offset, uint32_t length, std::string name)
     : VGMItem(parentFile, offset, length, std::move(name), Type::Track),
@@ -31,8 +45,11 @@ void SeqTrack::resetVars() {
   totalTicks = -1;
   deltaTime = 0;
   vol = 100;
+  volResolution = Resolution::SevenBit;
   expression = 127;
+  expressionResolution = Resolution::SevenBit;
   mastVol = 127;
+  masterVolResolution = Resolution::SevenBit;
   prevPan = 64;
   prevReverb = 40;
   channelGroup = 0;
@@ -47,6 +64,23 @@ void SeqTrack::resetVars() {
   visitedControlFlowStates.clear();
   prevDurEventIndices.clear();
   m_activeNoteEventIndices.clear();
+  clearSeqEventTarget();
+}
+
+void SeqTrack::resetSegmentVars() {
+  active = true;
+  bInLoop = false;
+  infiniteLoops = 0;
+  totalTicks = -1;
+  deltaTime = 0;
+  returnOffsets.clear();
+  loopStack.clear();
+  visitedControlFlowStates.clear();
+  prevDurEventIndices.clear();
+  m_activeNoteEventIndices.clear();
+  m_lastEventOffset = 0;
+  m_lastEventLength = 0;
+  clearSeqEventTarget();
 }
 
 void SeqTrack::resetVisitedAddresses() {
@@ -82,6 +116,19 @@ bool SeqTrack::loadTrackInit(int trackNum, MidiTrack *preparedMidiTrack) {
     }
   }
   return true;
+}
+
+void SeqTrack::loadTrackSegmentInit(uint32_t segmentOffset, uint32_t segmentLength,
+                                    bool segmentActive, uint32_t initialOffset) {
+  resetVisitedAddresses();
+  resetSegmentVars();
+  active = segmentActive;
+  setRange(segmentOffset, segmentLength);
+  curOffset = initialOffset;
+
+  if (active) {
+    addControlFlowState(curOffset);
+  }
 }
 
 void SeqTrack::loadTrackMainLoop(uint32_t stopOffset, int32_t stopTime) {
@@ -142,7 +189,7 @@ void SeqTrack::setChannelAndGroupFromTrkNum(int trk) {
   constexpr int kChannelsPerBank = 16;
   constexpr int kSkippedChannel  = 9;
 
-  if (ConversionOptions::the().skipChannel10()) {
+  if (parentSeq->conversionContext().skipChannel10) {
     // Pack tracks into 15 usable slots per 16-channel bank, skipping 9.
     constexpr int kUsablePerBank = kChannelsPerBank - 1; // 15
     const int group  = trk / kUsablePerBank;
@@ -254,6 +301,71 @@ void SeqTrack::addControllerSlide(uint32_t dur,
   prevVal = targVal;
 }
 
+void SeqTrack::addForModSourceNoItem(ModSource source, uint8_t value) const {
+  if (readMode != READMODE_CONVERT_TO_MIDI) {
+    return;
+  }
+
+  if (auto controller = midiControllerForModSource(source)) {
+    pMidiTrack->addControllerEvent(channel, *controller, value);
+    return;
+  }
+
+  switch (source) {
+    case ModSource::ChannelPressure:
+      pMidiTrack->addChannelPressure(channel, value);
+      break;
+    case ModSource::PitchWheel: {
+      const auto bend = static_cast<int16_t>(std::clamp<int>((static_cast<int>(value) * 128) - 8192, -8192, 8191));
+      pMidiTrack->addPitchBend(channel, bend);
+      break;
+    }
+    case ModSource::None:
+      [[fallthrough]];
+    case ModSource::PolyPressure:
+      [[fallthrough]];
+    default:
+      break;
+  }
+}
+
+void SeqTrack::addForModDestNoItem(ModDest destination, uint8_t value) const {
+  addForModSourceNoItem(parentSeq->conversionContext().midiSourceFor(destination), value);
+}
+
+void SeqTrack::addLfoModulationEvent(ModDest destination,
+                                     uint32_t offset,
+                                     uint32_t length,
+                                     uint8_t value,
+                                     const std::string& eventName,
+                                     Type type) {
+  const bool isNewOffset = onEvent(offset, length);
+  recordSeqEvent<SeqEvent>(isNewOffset,
+                           getTime(),
+                           offset,
+                           length,
+                           eventName,
+                           type,
+                           fmt::format("Value: {:d}", value));
+  addForModDestNoItem(destination, value);
+}
+
+// Emit synth vibrato depth through the configured ModDest source if it changed.
+bool SeqTrack::emitVibratoDepth(SeqSynthLfoAutomation& automation, uint8_t depth, bool force) {
+  return automation.emitDepth(depth,
+                              [this](uint8_t outputDepth) {
+                                addVibratoDepthNoItem(outputDepth);
+                              },
+                              force);
+}
+
+bool SeqTrack::emitTremoloDepth(SeqSynthLfoAutomation& automation, uint8_t depth, bool force) {
+  return automation.emitDepth(depth,
+                              [this](uint8_t outputDepth) {
+                                addTremoloDepthNoItem(outputDepth);
+                              },
+                              force);
+}
 
 bool SeqTrack::isOffsetUsed(uint32_t offset) {
   if (offset <= visitedAddressMax) {
@@ -329,8 +441,13 @@ SeqEvent* SeqTrack::addGenericEvent(uint32_t offset,
   bool isNewOffset = onEvent(offset, length);
 
   if (readMode == READMODE_ADD_TO_UI) {
-    return isNewOffset ? addEvent(new SeqEvent(this, offset, length, sEventName, type, sEventDesc))
-                       : nullptr;
+    if (isNewOffset && m_emitSeqEvents) {
+      auto* target = seqEventTarget();
+      auto* event = new SeqEvent(target, offset, length, sEventName, type, sEventDesc);
+      event->channel = static_cast<uint8_t>(channel);
+      return target->addEvent(event);
+    }
+    return nullptr;
   }
 
   recordSeqEvent<SeqEvent>(isNewOffset, getTime(), offset, length, sEventName, type, sEventDesc);
@@ -660,7 +777,7 @@ void SeqTrack::addPercNoteByDur(uint32_t offset,
                                 uint32_t dur,
                                 const std::string &sEventName) {
   uint8_t origChan = channel;
-  if (!ConversionOptions::the().skipChannel10())
+  if (!parentSeq->conversionContext().skipChannel10)
     channel = 9;
   int8_t origDrumNote = cDrumNote;
   cDrumNote = -1;
@@ -783,7 +900,7 @@ void SeqTrack::clearPrevDurEvents() {
   prevDurEventIndices.clear();
 }
 
-double SeqTrack::applyLevelCorrection(double level, LevelController controller) const {
+double SeqTrack::applyPanVolumeCorrection(double level, LevelController controller) const {
   if (controller != LevelController::MasterVolume) {
     PanVolumeCorrectionMode relevantCorrectionMode = controller == LevelController::Volume ?
       PanVolumeCorrectionMode::kAdjustVolumeController :
@@ -791,29 +908,35 @@ double SeqTrack::applyLevelCorrection(double level, LevelController controller) 
     if (parentSeq->panVolumeCorrectionMode == relevantCorrectionMode)
       level *= panVolumeCorrectionRate;
   }
-  if (usesLinearAmplitudeScale())
-    level = sqrt(level);
   return level;
 }
 
 void SeqTrack::addLevelNoItem(double level, LevelController controller, Resolution res, int absTime) {
-  u16 origLevel = static_cast<u16>(level * (res == Resolution::FourteenBit ? 16383.0 : 127.0));
+  level = std::clamp(level, 0.0, 1.0);
+  const uint16_t maxLevel = maxLevelForResolution(res);
+  const u16 origLevel = static_cast<u16>(std::lround(level * maxLevel));
   switch (controller) {
     case LevelController::Volume:
       vol = origLevel;
+      volResolution = res;
       break;
     case LevelController::Expression:
       expression = origLevel;
+      expressionResolution = res;
       break;
     case LevelController::MasterVolume:
       mastVol = origLevel;
+      masterVolResolution = res;
       break;
   }
 
-  level = applyLevelCorrection(level, controller);
+  level = applyPanVolumeCorrection(level, controller);
+  level = std::clamp(level, 0.0, 1.0);
   switch (res) {
     case Resolution::SevenBit: {
-      u8 midiLevel = static_cast<uint8_t>(std::min(level * 127.0, 127.0));
+      const u8 midiLevel = usesLinearAmplitudeScale()
+        ? convertPercentAmpToStdMidiVal(level)
+        : static_cast<u8>(std::lround(level * maxLevel));
       switch (controller) {
         case LevelController::Volume:
           if (readMode == READMODE_CONVERT_TO_MIDI) {
@@ -846,9 +969,11 @@ void SeqTrack::addLevelNoItem(double level, LevelController controller, Resoluti
       break;
     }
     case Resolution::FourteenBit: {
-      u16 midiLevel = static_cast<uint16_t>(std::min(level * 16383.0, 16383.0));
-      u8 levelHi = static_cast<uint8_t>((midiLevel >> 7) & 0x7F);
-      u8 levelLo = static_cast<uint8_t>(midiLevel & 0x7F);
+      const u16 midiLevel = usesLinearAmplitudeScale()
+        ? convertPercentAmpToStd14BitMidiVal(level)
+        : static_cast<u16>(std::lround(level * maxLevel));
+      const u8 levelHi = static_cast<uint8_t>((midiLevel >> 7) & 0x7F);
+      const u8 levelLo = static_cast<uint8_t>(midiLevel & 0x7F);
       switch (controller) {
         case LevelController::Volume:
           if (readMode == READMODE_CONVERT_TO_MIDI) {
@@ -868,7 +993,7 @@ void SeqTrack::addLevelNoItem(double level, LevelController controller, Resoluti
               pMidiTrack->addExpression(channel, levelHi);
             } else {
               pMidiTrack->insertExpressionFine(channel, levelLo, absTime);
-              pMidiTrack->insertVol(channel, levelHi, absTime);
+              pMidiTrack->insertExpression(channel, levelHi, absTime);
             }
           }
           break;
@@ -885,6 +1010,27 @@ void SeqTrack::addLevelNoItem(double level, LevelController controller, Resoluti
       break;
     }
   }
+}
+
+void SeqTrack::reapplyStoredLevelNoItem(LevelController controller, int absTime) {
+  uint16_t rawLevel;
+  Resolution resolution;
+  switch (controller) {
+    case LevelController::Volume:
+      rawLevel = vol;
+      resolution = volResolution;
+      break;
+    case LevelController::Expression:
+      rawLevel = expression;
+      resolution = expressionResolution;
+      break;
+    case LevelController::MasterVolume:
+      rawLevel = mastVol;
+      resolution = masterVolResolution;
+      break;
+  }
+
+  addLevelNoItem(normalizedLevelFromRaw(rawLevel, resolution), controller, resolution, absTime);
 }
 
 void SeqTrack::addVol(u32 offset, u32 length, double volPercent, Resolution res, const std::string &sEventName) {
@@ -914,12 +1060,14 @@ void SeqTrack::addVolSlide(uint32_t offset,
 
   recordDurSeqEvent<VolSlideSeqEvent>(isNewOffset, getTime(), dur, targVol, dur, offset, length, sEventName);
 
-  if (readMode == READMODE_CONVERT_TO_MIDI)
+  if (readMode == READMODE_CONVERT_TO_MIDI) {
     addControllerSlide(dur,
                        vol,
                        targVol,
                        usesLinearAmplitudeScale() ? convert7bitPercentAmpToStdMidiVal : nullptr,
                        &MidiTrack::insertVol);
+    volResolution = Resolution::SevenBit;
+  }
 }
 
 void SeqTrack::insertVol(uint32_t offset,
@@ -930,7 +1078,7 @@ void SeqTrack::insertVol(uint32_t offset,
   bool isNewOffset = onEvent(offset, length);
 
   recordSeqEvent<VolSeqEvent>(isNewOffset, absTime, newVol, offset, length, sEventName);
-  addLevelNoItem(newVol / 127.0, LevelController::Volume, Resolution::SevenBit);
+  addLevelNoItem(newVol / 127.0, LevelController::Volume, Resolution::SevenBit, absTime);
 }
 
 void SeqTrack::addExpression(u32 offset, u32 length, double levelPercent, Resolution res, const std::string &sEventName) {
@@ -962,12 +1110,14 @@ void SeqTrack::addExpressionSlide(uint32_t offset,
 
   recordDurSeqEvent<ExpressionSlideSeqEvent>(isNewOffset, getTime(), dur, targExpr, dur, offset, length, sEventName);
 
-  if (readMode == READMODE_CONVERT_TO_MIDI)
+  if (readMode == READMODE_CONVERT_TO_MIDI) {
     addControllerSlide(dur,
                        expression,
                        targExpr,
                        usesLinearAmplitudeScale() ? convert7bitPercentAmpToStdMidiVal : nullptr,
                        &MidiTrack::insertExpression);
+    expressionResolution = Resolution::SevenBit;
+  }
 }
 
 void SeqTrack::insertExpression(uint32_t offset,
@@ -992,6 +1142,13 @@ void SeqTrack::addMasterVol(uint32_t offset, uint32_t length, uint8_t newVol, co
   addMasterVolNoItem(newVol);
 }
 
+void SeqTrack::addMasterVol(u32 offset, u32 length, double volPercent, Resolution res, const std::string &sEventName) {
+  bool isNewOffset = onEvent(offset, length);
+
+  recordSeqEvent<MastVolSeqEvent>(isNewOffset, getTime(), volPercent, offset, length, sEventName);
+  addLevelNoItem(volPercent, LevelController::MasterVolume, res, -1);
+}
+
 void SeqTrack::addMasterVolNoItem(uint8_t newVol) {
   addLevelNoItem(newVol / 127.0, LevelController::MasterVolume, Resolution::SevenBit);
 }
@@ -1005,12 +1162,14 @@ void SeqTrack::addMastVolSlide(uint32_t offset,
 
   recordDurSeqEvent<MastVolSlideSeqEvent>(isNewOffset, getTime(), dur, targVol, dur, offset, length, sEventName);
 
-  if (readMode == READMODE_CONVERT_TO_MIDI)
+  if (readMode == READMODE_CONVERT_TO_MIDI) {
     addControllerSlide(dur,
                        mastVol,
                        targVol,
                        usesLinearAmplitudeScale() ? convert7bitPercentAmpToStdMidiVal : nullptr,
                        &MidiTrack::insertMasterVol);
+    masterVolResolution = Resolution::SevenBit;
+  }
 }
 
 void SeqTrack::addPan(uint32_t offset, uint32_t length, uint8_t pan, const std::string &sEventName) {
@@ -1029,11 +1188,11 @@ void SeqTrack::addPanNoItem(uint8_t pan) {
 
     switch (parentSeq->panVolumeCorrectionMode) {
     case PanVolumeCorrectionMode::kAdjustVolumeController:
-      addVolNoItem(vol);
+      reapplyStoredLevelNoItem(LevelController::Volume);
       break;
 
     case PanVolumeCorrectionMode::kAdjustExpressionController:
-      addExpressionNoItem(expression);
+      reapplyStoredLevelNoItem(LevelController::Expression);
       break;
 
     default:
@@ -1075,11 +1234,11 @@ void SeqTrack::insertPan(uint32_t offset,
     // TODO: (bugfix) Pan volume compensation does not work properly when using pan slider and volume slider at the same time
     switch (parentSeq->panVolumeCorrectionMode) {
     case PanVolumeCorrectionMode::kAdjustVolumeController:
-      insertVol(offset, length, vol, absTime);
+      reapplyStoredLevelNoItem(LevelController::Volume, absTime);
       break;
 
     case PanVolumeCorrectionMode::kAdjustExpressionController:
-      insertExpression(offset, length, expression, absTime);
+      reapplyStoredLevelNoItem(LevelController::Expression, absTime);
       break;
 
     default:
@@ -1134,8 +1293,7 @@ void SeqTrack::addPitchBend(uint32_t offset, uint32_t length, int16_t bend, cons
 
   recordSeqEvent<PitchBendSeqEvent>(isNewOffset, getTime(), bend, offset, length, sEventName);
 
-  if (readMode == READMODE_CONVERT_TO_MIDI)
-    pMidiTrack->addPitchBend(channel, bend);
+  addPitchBendNoItem(bend);
 }
 
 void SeqTrack::addPitchBendAsPercent(uint32_t offset, uint32_t length, double percent, const std::string &sEventName) {
@@ -1144,6 +1302,11 @@ void SeqTrack::addPitchBendAsPercent(uint32_t offset, uint32_t length, double pe
   const s16 bendVal = static_cast<s16>(percent * 8192);
   s16 bend = std::clamp(bendVal, minVal, maxVal);
   addPitchBend(offset, length, bend, sEventName);
+}
+
+void SeqTrack::addPitchBendNoItem(int16_t bend) const {
+  if (readMode == READMODE_CONVERT_TO_MIDI)
+    pMidiTrack->addPitchBend(channel, bend);
 }
 
 void SeqTrack::addPitchBendRange(uint32_t offset, uint32_t length, uint16_t cents, const std::string &sEventName) {
@@ -1158,6 +1321,34 @@ void SeqTrack::addPitchBendRange(uint32_t offset, uint32_t length, uint16_t cent
 void SeqTrack::addPitchBendRangeNoItem(uint16_t cents) const {
   if (readMode == READMODE_CONVERT_TO_MIDI)
     pMidiTrack->addPitchBendRange(channel, cents);
+}
+
+void SeqTrack::addChannelPressure(uint32_t offset,
+                                  uint32_t length,
+                                  uint8_t pressure,
+                                  const std::string &sEventName) {
+  bool isNewOffset = onEvent(offset, length);
+
+  recordSeqEvent<ChannelPressureSeqEvent>(isNewOffset, getTime(), pressure, offset, length, sEventName);
+  addChannelPressureNoItem(pressure);
+}
+
+void SeqTrack::addChannelPressureNoItem(uint8_t pressure) {
+  if (readMode == READMODE_CONVERT_TO_MIDI)
+    pMidiTrack->addChannelPressure(channel, pressure);
+}
+
+void SeqTrack::insertChannelPressure(uint32_t offset,
+                                     uint32_t length,
+                                     uint8_t pressure,
+                                     uint32_t absTime,
+                                     const std::string &sEventName) {
+  bool isNewOffset = onEvent(offset, length);
+
+  recordSeqEvent<ChannelPressureSeqEvent>(isNewOffset, absTime, pressure, offset, length, sEventName);
+
+  if (readMode == READMODE_CONVERT_TO_MIDI)
+    pMidiTrack->insertChannelPressure(channel, pressure, absTime);
 }
 
 void SeqTrack::addFineTuning(uint32_t offset, uint32_t length, double cents, const std::string &sEventName) {
@@ -1264,6 +1455,74 @@ void SeqTrack::insertBreath(uint32_t offset,
 
   if (readMode == READMODE_CONVERT_TO_MIDI)
     pMidiTrack->insertBreath(channel, depth, absTime);
+}
+
+void SeqTrack::addVibratoDepth(uint32_t offset,
+                               uint32_t length,
+                               uint8_t depth,
+                               const std::string& sEventName) {
+  const bool isNewOffset = onEvent(offset, length);
+  recordSeqEvent<ModulationSeqEvent>(isNewOffset, getTime(), depth, offset, length, sEventName);
+  addVibratoDepthNoItem(depth);
+}
+
+void SeqTrack::addVibratoDepthNoItem(uint8_t depth) const {
+  addForModDestNoItem(ModDest::VibLfoToPitch, depth);
+}
+
+void SeqTrack::addVibratoFrequency(uint32_t offset,
+                                   uint32_t length,
+                                   uint8_t frequency,
+                                   const std::string& sEventName) {
+  addLfoModulationEvent(ModDest::VibLfoFreq, offset, length, frequency, sEventName, Type::Vibrato);
+}
+
+void SeqTrack::addVibratoFrequencyNoItem(uint8_t frequency) const {
+  addForModDestNoItem(ModDest::VibLfoFreq, frequency);
+}
+
+void SeqTrack::addVibratoDelay(uint32_t offset,
+                               uint32_t length,
+                               uint8_t delay,
+                               const std::string& sEventName) {
+  addLfoModulationEvent(ModDest::VibLfoDelay, offset, length, delay, sEventName, Type::Vibrato);
+}
+
+void SeqTrack::addVibratoDelayNoItem(uint8_t delay) const {
+  addForModDestNoItem(ModDest::VibLfoDelay, delay);
+}
+
+void SeqTrack::addTremoloDepth(uint32_t offset,
+                               uint32_t length,
+                               uint8_t depth,
+                               const std::string& sEventName) {
+  addLfoModulationEvent(ModDest::ModLfoToVol, offset, length, depth, sEventName, Type::Tremelo);
+}
+
+void SeqTrack::addTremoloDepthNoItem(uint8_t depth) const {
+  addForModDestNoItem(ModDest::ModLfoToVol, depth);
+}
+
+void SeqTrack::addTremoloFrequency(uint32_t offset,
+                                   uint32_t length,
+                                   uint8_t frequency,
+                                   const std::string& sEventName) {
+  addLfoModulationEvent(ModDest::ModLfoFreq, offset, length, frequency, sEventName, Type::Tremelo);
+}
+
+void SeqTrack::addTremoloFrequencyNoItem(uint8_t frequency) const {
+  addForModDestNoItem(ModDest::ModLfoFreq, frequency);
+}
+
+void SeqTrack::addTremoloDelay(uint32_t offset,
+                               uint32_t length,
+                               uint8_t delay,
+                               const std::string& sEventName) {
+  addLfoModulationEvent(ModDest::ModLfoDelay, offset, length, delay, sEventName, Type::Tremelo);
+}
+
+void SeqTrack::addTremoloDelayNoItem(uint8_t delay) const {
+  addForModDestNoItem(ModDest::ModLfoDelay, delay);
 }
 
 void SeqTrack::addSustainEvent(uint32_t offset, uint32_t length, uint8_t depth, const std::string &sEventName) {
@@ -1400,6 +1659,11 @@ void InsertExpression(uint8_t expression, uint32_t absTime);
 void AddPanEvent(uint8_t pan);
 void InsertPanEvent(uint8_t pan, uint32_t absTime);*/
 
+void SeqTrack::addLegatoPedalNoItem(bool bOn) {
+  if (readMode == READMODE_CONVERT_TO_MIDI)
+    pMidiTrack->addLegatoPedal(channel, bOn);
+}
+
 void SeqTrack::addProgramChange(uint32_t offset, uint32_t length, uint32_t progNum, const std::string &sEventName) {
   addProgramChange(offset, length, progNum, false, sEventName);
 }
@@ -1459,7 +1723,7 @@ void SeqTrack::addProgramChange(uint32_t offset,
 void SeqTrack::addProgramChangeNoItem(uint32_t progNum, bool requireBank) const {
   if (readMode == READMODE_CONVERT_TO_MIDI) {
     if (requireBank) {
-      if (auto style = ConversionOptions::the().bankSelectStyle();
+      if (auto style = parentSeq->conversionContext().bankSelectStyle;
           style == BankSelectStyle::GS) {
         pMidiTrack->addBankSelect(channel, (progNum >> 7) & 0x7f);
       } else if (style == BankSelectStyle::MMA) {
@@ -1483,7 +1747,7 @@ void SeqTrack::addBankSelect(uint32_t offset, uint32_t length, uint8_t bank, con
 
 void SeqTrack::addBankSelectNoItem(uint8_t bank) const {
   if (readMode == READMODE_CONVERT_TO_MIDI) {
-    if (auto style = ConversionOptions::the().bankSelectStyle();
+    if (auto style = parentSeq->conversionContext().bankSelectStyle;
         style == BankSelectStyle::GS) {
       pMidiTrack->addBankSelect(channel, bank & 0x7f);
     } else if (style == BankSelectStyle::MMA) {
@@ -1721,7 +1985,7 @@ bool SeqTrack::checkControlStateForInfiniteLoop(u32 offset) {
     return false;
   }
   // When we've hit the maximum number of sequence loops, quit parsing
-  if (infiniteLoops > ConversionOptions::the().numSequenceLoops()) {
+  if (infiniteLoops > parentSeq->conversionContext().sequenceLoops) {
     return false;
   }
   // Otherwise, clear control flow states to allow another full loop of conversion
@@ -1793,7 +2057,7 @@ bool SeqTrack::addLoopForever(uint32_t offset, uint32_t length, const std::strin
   }
   else if (readMode == READMODE_FIND_DELTA_LENGTH) {
     totalTicks = getTime();
-    return (this->infiniteLoops <= ConversionOptions::the().numSequenceLoops());
+    return (this->infiniteLoops <= parentSeq->conversionContext().sequenceLoops);
   }
   return true;
 

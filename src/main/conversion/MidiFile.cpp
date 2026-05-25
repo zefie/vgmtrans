@@ -383,6 +383,14 @@ void MidiTrack::insertMono(uint8_t channel, uint32_t absTime) {
   aEvents.push_back(new MonoEvent(this, channel, absTime));
 }
 
+void MidiTrack::addLegatoPedal(uint8_t channel, bool bOn) {
+  aEvents.push_back(new LegatoPedalEvent(this, channel, getDelta(), bOn));
+}
+
+void MidiTrack::insertLegatoPedal(uint8_t channel, bool bOn, uint32_t absTime) {
+  aEvents.push_back(new LegatoPedalEvent(this, channel, absTime, bOn));
+}
+
 void MidiTrack::addPan(uint8_t channel, uint8_t pan) {
   aEvents.push_back(new PanEvent(this, channel, getDelta(), pan));
 }
@@ -421,6 +429,14 @@ void MidiTrack::addPitchBend(uint8_t channel, int16_t bend) {
 
 void MidiTrack::insertPitchBend(uint8_t channel, int16_t bend, uint32_t absTime) {
   aEvents.push_back(new PitchBendEvent(this, channel, absTime, bend));
+}
+
+void MidiTrack::addChannelPressure(uint8_t channel, uint8_t pressure) {
+  aEvents.push_back(new ChannelPressureEvent(this, channel, getDelta(), pressure));
+}
+
+void MidiTrack::insertChannelPressure(uint8_t channel, uint8_t pressure, uint32_t absTime) {
+  aEvents.push_back(new ChannelPressureEvent(this, channel, absTime, pressure));
 }
 
 void MidiTrack::addPitchBendRange(uint8_t channel, uint16_t cents) {
@@ -847,6 +863,19 @@ uint32_t ControllerEvent::writeEvent(std::vector<uint8_t> &buf, uint32_t time) {
   return absTime;
 }
 
+//  **********************
+//  PortamentoControlEvent
+//  **********************
+
+uint32_t PortamentoControlEvent::writeEvent(std::vector<uint8_t> &buf, uint32_t time) {
+  // Add the global transpose into the starting key of the portamento control event
+  u8 originalDataByte = dataByte;
+  dataByte = std::clamp<s16>(dataByte + prntTrk->parentSeq->globalTranspose, 0, 127);
+  u32 result = ControllerEvent::writeEvent(buf, time);
+  dataByte = originalDataByte;
+  return result;
+}
+
 //  **********
 //  SysexEvent
 //  **********
@@ -896,6 +925,24 @@ uint32_t PitchBendEvent::writeEvent(std::vector<uint8_t> &buf, uint32_t time) {
   buf.push_back(0xE0 + channel);
   buf.push_back(loByte);
   buf.push_back(hiByte);
+  return absTime;
+}
+
+//  ********************
+//  ChannelPressureEvent
+//  ********************
+
+ChannelPressureEvent::ChannelPressureEvent(MidiTrack *prntTrk,
+                                           uint8_t channel,
+                                           uint32_t absoluteTime,
+                                           uint8_t pressureAmt)
+    : MidiEvent(prntTrk, absoluteTime, channel, PRIORITY_MIDDLE), pressure(pressureAmt) {
+}
+
+uint32_t ChannelPressureEvent::writeEvent(std::vector<uint8_t> &buf, uint32_t time) {
+  writeVarLength(buf, absTime - time);
+  buf.push_back(0xD0 + channel);
+  buf.push_back(pressure & 0x7F);
   return absTime;
 }
 

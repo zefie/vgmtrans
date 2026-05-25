@@ -46,6 +46,7 @@ typedef enum {
   MIDIEVENT_PAN,
   MIDIEVENT_PROGRAMCHANGE,
   MIDIEVENT_PITCHBEND,
+  MIDIEVENT_CHANNELPRESSURE,
   MIDIEVENT_TEMPO,
   MIDIEVENT_TIMESIG,
   MIDIEVENT_MODULATION,
@@ -55,6 +56,7 @@ typedef enum {
   MIDIEVENT_PORTAMENTOTIME,
   MIDIEVENT_PORTAMENTOTIMEFINE,
   MIDIEVENT_PORTAMENTOCONTROL,
+  MIDIEVENT_LEGATOPEDAL,
   MIDIEVENT_MONO,
   MIDIEVENT_LFO,
   MIDIEVENT_VIBRATO,
@@ -128,9 +130,13 @@ class MidiTrack {
   void insertPortamentoControl(uint8_t channel, uint8_t key, uint32_t absTime);
   void addMono(uint8_t channel);
   void insertMono(uint8_t channel, uint32_t absTime);
+  void addLegatoPedal(uint8_t channel, bool bOn);
+  void insertLegatoPedal(uint8_t channel, bool bOn, uint32_t absTime);
 
   void addPitchBend(uint8_t channel, int16_t bend);
   void insertPitchBend(uint8_t channel, short bend, uint32_t absTime);
+  void addChannelPressure(uint8_t channel, uint8_t pressure);
+  void insertChannelPressure(uint8_t channel, uint8_t pressure, uint32_t absTime);
   void addPitchBendRange(uint8_t channel, uint16_t cents);
   void insertPitchBendRange(uint8_t channel, uint16_t cents, uint32_t absTime);
   void addFineTuning(uint8_t channel, uint8_t msb, uint8_t lsb);
@@ -403,6 +409,15 @@ public:
   PortamentoControlEvent(MidiTrack *prntTrk, uint8_t channel, uint32_t absoluteTime, uint8_t key)
       : ControllerEvent(prntTrk, channel, absoluteTime, 84, key, PRIORITY_MIDDLE) { }
   MidiEventType eventType() override { return MIDIEVENT_PORTAMENTOCONTROL; }
+  uint32_t writeEvent(std::vector<uint8_t> &buf, uint32_t time) override;
+};
+
+class LegatoPedalEvent
+    : public ControllerEvent {
+public:
+  LegatoPedalEvent(MidiTrack *prntTrk, uint8_t channel, uint32_t absoluteTime, bool bOn)
+      : ControllerEvent(prntTrk, channel, absoluteTime, 68, (bOn) ? 0x7F : 0, PRIORITY_HIGH) { }
+  MidiEventType eventType() override { return MIDIEVENT_LEGATOPEDAL; }
 };
 
 class PanEvent
@@ -518,6 +533,15 @@ class PitchBendEvent
   int16_t bend;
 };
 
+class ChannelPressureEvent
+    : public MidiEvent {
+ public:
+  ChannelPressureEvent(MidiTrack *prntTrk, uint8_t channel, uint32_t absoluteTime, uint8_t pressure);
+  MidiEventType eventType() override { return MIDIEVENT_CHANNELPRESSURE; }
+  uint32_t writeEvent(std::vector<uint8_t> &buf, uint32_t time) override;
+
+  uint8_t pressure;
+};
 
 class TempoEvent
     : public MidiEvent {

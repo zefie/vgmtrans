@@ -5,9 +5,11 @@
  */
 
 #pragma once
-#include <algorithm>
 #include <memory>
 #include <string_view>
+
+#include "ConversionTypes.h"
+#include "ModSourceMap.h"
 
 struct OptionStore {
   struct Group {
@@ -23,13 +25,6 @@ struct OptionStore {
   virtual void setInt(std::string_view key, int value) = 0;
   virtual int getBool(std::string_view key, bool def) const = 0;
   virtual void setBool(std::string_view key, bool value) = 0;
-};
-
-enum class BankSelectStyle {
-  /* CC0 MSB (default) */
-  GS,
-  /* CC0 * 128 + CC32 */
-  MMA
 };
 
 class ConversionOptions {
@@ -52,9 +47,7 @@ public:
   void setBankSelectStyle(BankSelectStyle style) { m_bs_style = style; }
 
   int numSequenceLoops() const { return m_sequence_loops; }
-  void setNumSequenceLoops(int numLoops) {
-    m_sequence_loops = std::clamp(numLoops, 0, kMaxSequenceLoops);
-  }
+  void setNumSequenceLoops(int numLoops);
 
   bool skipChannel10() const { return m_skip_channel_10; }
   void setSkipChannel10(bool should) { m_skip_channel_10 = should; }
@@ -62,23 +55,11 @@ public:
   bool forceZmfExport() const { return m_force_zmf_export; }
   void setForceZmfExport(bool should) { m_force_zmf_export = should; }
 
-  void load(OptionStore& store) {
-    auto g = store.beginGroup("ConversionOptions");
-    const int bs = store.getInt("bankSelectStyle", static_cast<int>(BankSelectStyle::GS));
-    m_bs_style = (bs == static_cast<int>(BankSelectStyle::MMA)) ? BankSelectStyle::MMA
-                                                                : BankSelectStyle::GS;
-    m_sequence_loops = std::clamp(store.getInt("sequenceLoops", 1), 0, kMaxSequenceLoops);
-    m_skip_channel_10 = store.getBool("skipChannel10", true);
-    m_force_zmf_export = store.getBool("forceZmfExport", false);
-  }
+  [[nodiscard]] ModSourceMap& modSourceMap(SynthTarget target);
+  [[nodiscard]] const ModSourceMap& modSourceMap(SynthTarget target) const;
 
-  void save(OptionStore& store) const {
-    auto g = store.beginGroup("ConversionOptions");
-    store.setInt("bankSelectStyle", static_cast<int>(m_bs_style));
-    store.setInt("sequenceLoops",   m_sequence_loops);
-    store.setBool("skipChannel10", m_skip_channel_10);
-    store.setBool("forceZmfExport", m_force_zmf_export);
-  }
+  void load(OptionStore& store);
+  void save(OptionStore& store) const;
 
 private:
   ConversionOptions() = default;
@@ -87,4 +68,6 @@ private:
   int m_sequence_loops{0};
   bool m_skip_channel_10{true};
   bool m_force_zmf_export{false};
+  ModSourceMap m_sf2_mod_sources{SynthTarget::SoundFont};
+  ModSourceMap m_dls_mod_sources{SynthTarget::DLS};
 };

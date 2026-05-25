@@ -147,6 +147,8 @@ add_library(vgmtranscore OBJECT)
 target_sources(vgmtranscore
   PRIVATE
     LogManager.cpp
+    ConversionContext.cpp
+    ModSourceMap.cpp
     Options.cpp
     Root.cpp
     components/FileLoader.cpp
@@ -157,9 +159,9 @@ target_sources(vgmtranscore
     components/VGMFile.cpp
     components/VGMItem.cpp
     components/VGMMiscFile.cpp
-    components/VGMMultiSectionSeq.cpp
     components/VGMSampColl.cpp
     components/VGMTag.cpp
+        components/instr/Modulation.cpp
     components/instr/VGMInstrSet.cpp
     components/instr/VGMRgn.cpp
     components/instr/VGMSamp.cpp
@@ -171,7 +173,6 @@ target_sources(vgmtranscore
     components/seq/SeqTrack.cpp
     components/seq/VGMSeq.cpp
     components/seq/VGMSeqNoTrks.cpp
-    components/seq/VGMSeqSection.cpp
     conversion/DLSConversion.cpp
     conversion/DLSFile.cpp
     conversion/MidiFile.cpp
@@ -189,8 +190,10 @@ target_sources(vgmtranscore
     formats/Akao/AkaoScanner.cpp
     formats/Akao/AkaoSeq.cpp
     formats/AkaoSnes/AkaoSnesInstr.cpp
+    formats/AkaoSnes/AkaoSnesModulation.cpp
     formats/AkaoSnes/AkaoSnesScanner.cpp
     formats/AkaoSnes/AkaoSnesSeq.cpp
+    formats/AkaoSnes/AkaoSnesTrackLfo.cpp
     formats/AsciiShuichiSnes/AsciiShuichiSnesInstr.cpp
     formats/AsciiShuichiSnes/AsciiShuichiSnesScanner.cpp
     formats/AsciiShuichiSnes/AsciiShuichiSnesSeq.cpp
@@ -270,6 +273,8 @@ target_sources(vgmtranscore
     formats/NinSnes/NinSnesScannerPatterns.cpp
     formats/NinSnes/NinSnesSeq.cpp
     formats/NinSnes/NinSnesSeqIntelli.cpp
+    formats/NinSnes/NinSnesTrack.cpp
+    formats/NinSnes/NinSnesTrackModulation.cpp
     formats/Org/OrgScanner.cpp
     formats/Org/OrgSeq.cpp
     formats/PS1/PS1Seq.cpp
@@ -306,6 +311,7 @@ target_sources(vgmtranscore
     formats/TriAcePS1/TriAcePS1Seq.cpp
     formats/common/KonamiAdpcm.cpp
     formats/common/OkiAdpcm.cpp
+    formats/common/PSGDSP.cpp
     formats/common/PSXSPU.cpp
     formats/common/SNESDSP.cpp
     formats/common/YM2151InstrSet.cpp
@@ -327,7 +333,10 @@ target_sources(vgmtranscore
     FILES
       LogItem.h
       LogManager.h
+      ConversionContext.h
+      ConversionTypes.h
       Loop.h
+      ModSourceMap.h
       Options.h
       Root.h
     FILE_SET headers_formats TYPE HEADERS BASE_DIRS formats
@@ -340,6 +349,7 @@ target_sources(vgmtranscore
       formats/Akao/AkaoSeq.h
       formats/AkaoSnes/AkaoSnesFormat.h
       formats/AkaoSnes/AkaoSnesInstr.h
+      formats/AkaoSnes/AkaoSnesModulation.h
       formats/AkaoSnes/AkaoSnesScanner.h
       formats/AkaoSnes/AkaoSnesSeq.h
       formats/AsciiShuichiSnes/AsciiShuichiSnesFormat.h
@@ -498,6 +508,7 @@ target_sources(vgmtranscore
     FILES
       formats/common/KonamiAdpcm.h
       formats/common/OkiAdpcm.h
+      formats/common/PSGDSP.h
       formats/common/PSXSPU.h
       formats/common/SNESDSP.h
       formats/common/YM2151.h
@@ -526,11 +537,11 @@ target_sources(vgmtranscore
       components/VGMFile.h
       components/VGMItem.h
       components/VGMMiscFile.h
-      components/VGMMultiSectionSeq.h
       components/VGMSampColl.h
       components/VGMTag.h
     FILE_SET headers_components_instr TYPE HEADERS BASE_DIRS components/instr
     FILES
+        components/instr/Modulation.h
       components/instr/VGMInstrSet.h
       components/instr/VGMRgn.h
       components/instr/VGMSamp.h
@@ -545,11 +556,14 @@ target_sources(vgmtranscore
     FILES
       components/seq/SeqEvent.h
       components/seq/SeqEventTimeIndex.h
+      components/seq/automation/SeqAutomation.h
+      components/seq/automation/SeqMidiAutomation.h
+      components/seq/automation/SeqMotion.h
+      components/seq/automation/SeqTrackAutomation.h
       components/seq/SeqSlider.h
       components/seq/SeqTrack.h
       components/seq/VGMSeq.h
       components/seq/VGMSeqNoTrks.h
-      components/seq/VGMSeqSection.h
     FILE_SET headers_conversion TYPE HEADERS BASE_DIRS conversion
     FILES
       conversion/DLSConversion.h
@@ -584,6 +598,16 @@ target_link_libraries(
   PUBLIC spdlog::spdlog unarr ZLIB::ZLIB minizip mio chdr-static nlohmann_json::nlohmann_json ${VGMTRANS_NEOBAE_TARGET}
 )
 target_compile_features(vgmtranscore PUBLIC cxx_std_20)
+
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles(
+  "int main() { const char *file_name = __FILE_NAME__; return file_name[0]; }"
+  HAS__FILE_NAME__)
+target_compile_definitions(vgmtranscore PUBLIC HAS__FILE_NAME__=$<BOOL:${HAS__FILE_NAME__}>)
+
+if(NOT HAS__FILE_NAME__ AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(vgmtranscore PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:-fmacro-prefix-map=${PROJECT_SOURCE_DIR}/=>")
+endif()
 
 configure_file(${PROJECT_SOURCE_DIR}/bin/mame_roms.json mame_roms.json COPYONLY)
 target_compile_definitions(vgmtranscore PUBLIC "DEV_ENV_BUILD_TREE=\"${CMAKE_CURRENT_BINARY_DIR}\"")

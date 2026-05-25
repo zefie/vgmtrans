@@ -1,5 +1,6 @@
 #pragma once
 #include "VGMSeq.h"
+#include "automation/SeqMidiAutomation.h"
 #include "SeqTrack.h"
 #include "SeqEvent.h"
 #include "CapcomSnesFormat.h"
@@ -106,13 +107,23 @@ class CapcomSnesTrack
   void setNoteSlurred(bool slurred);
 
  private:
+  [[nodiscard]] bool areLfoOutputsEnabled() const { return vibrato.rate() != 0; }
+  void addVibratoDepthEvent(uint32_t offset, uint32_t length, uint8_t depth);
+  void setLfoOutputsEnabled(bool enabled);
+  void handleLfoRateChange(uint8_t lfoRateByte);
+
   uint8_t repeatCount[CAPCOM_SNES_REPEAT_SLOT_MAX];      // repeat count for repeat command
   uint8_t noteAttributes;
   uint8_t durationRate;
   //int8_t transpose;
 
   bool lastNoteSlurred;
+  bool didRest;
   int8_t lastKey;
+  SeqSynthLfoAutomation vibrato;
+  SeqSynthLfoAutomation tremolo;
+  uint16_t lastPortamentoTime;
+  double portamentoMillisecondsPerCent;
 
   static double getTuningInSemitones(int8_t tuning);
 };

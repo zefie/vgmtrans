@@ -47,8 +47,8 @@ constexpr int HEX_TO_ASCII_SPACING_CHARS = 4;
 constexpr int SELECTION_PADDING = 18;
 constexpr int VIEWPORT_PADDING = 10;
 constexpr int DIM_DURATION_MS = 200;
-constexpr int PLAYBACK_FADE_DURATION_MS = 300;
-constexpr float PLAYBACK_FADE_CURVE = 3.0f;
+constexpr int PLAYBACK_FADE_DURATION_MS = 450;
+constexpr float PLAYBACK_FADE_CURVE = 2.0f;
 constexpr int OVERLAY_ALPHA = 80;
 constexpr float OVERLAY_ALPHA_F = OVERLAY_ALPHA / 255.0f;
 constexpr float SHADOW_OFFSET_X = 0.0f;
@@ -56,11 +56,10 @@ constexpr float SHADOW_OFFSET_Y = 0.0f;
 constexpr float SHADOW_BLUR_RADIUS = SELECTION_PADDING * 1.0f;
 constexpr float SHADOW_STRENGTH = 0.5;
 constexpr float SHADOW_EDGE_CURVE = 1.1f;
-constexpr float PLAYBACK_GLOW_STRENGTH = 0.55f;
+constexpr float PLAYBACK_GLOW_STRENGTH = 0.75f;
 constexpr float PLAYBACK_GLOW_RADIUS = 1.8f;
 constexpr float PLAYBACK_GLOW_EDGE_CURVE = 0.85f;
-const QColor PLAYBACK_GLOW_LOW(40, 40, 40);
-const QColor PLAYBACK_GLOW_HIGH(230, 230, 230);
+const QColor PLAYBACK_GLOW_FALLBACK(230, 230, 230);
 constexpr uint16_t STYLE_UNASSIGNED = std::numeric_limits<uint16_t>::max();
 
 struct WidgetLayoutMetrics {
@@ -328,6 +327,11 @@ uint64_t HexView::selectionKey(const SelectionRange& range) {
   return selectionKey(range.offset, range.length);
 }
 
+// Overload for colored playback ranges (keyed only by byte span).
+uint64_t HexView::selectionKey(const PlaybackSelection& range) {
+  return selectionKey(range.offset, range.length);
+}
+
 // Overload for fade playback selections (keyed by underlying range).
 uint64_t HexView::selectionKey(const FadePlaybackSelection& selection) {
   return selectionKey(selection.range);
@@ -362,8 +366,6 @@ HexView::HexView(VGMFile* vgmfile, QWidget* parent)
 
   QFont font = defaultViewFont();
   setShadowStrength(SHADOW_STRENGTH);
-  m_playbackGlowLow = PLAYBACK_GLOW_LOW;
-  m_playbackGlowHigh = PLAYBACK_GLOW_HIGH;
   m_playbackGlowStrength = PLAYBACK_GLOW_STRENGTH;
   m_playbackGlowRadius = PLAYBACK_GLOW_RADIUS;
   m_shadowEdgeCurve = SHADOW_EDGE_CURVE;
@@ -444,7 +446,7 @@ void HexView::setFont(const QFont& font) {
   }
 
   updateLayout();
-  requestRhiUpdate(true, true);
+  requestRhiUpdate(true, true, true);
 }
 
 // Return X origin of the hex byte columns (accounting for optional address column).
@@ -531,7 +533,9 @@ void HexView::updateScrollBars() {
 }
 
 // Forward dirty/update requests to the active RHI host.
-void HexView::requestRhiUpdate(bool markBaseDirty, bool markSelectionDirty) {
+void HexView::requestRhiUpdate(bool markBaseDirty,
+                               bool markSelectionDirty,
+                               bool markPlaybackDirty) {
   if (!m_rhiHost) {
     return;
   }
@@ -540,6 +544,9 @@ void HexView::requestRhiUpdate(bool markBaseDirty, bool markSelectionDirty) {
   }
   if (markSelectionDirty) {
     m_rhiHost->markSelectionDirty();
+  }
+  if (markPlaybackDirty) {
+    m_rhiHost->markPlaybackDirty();
   }
   m_rhiHost->requestUpdate();
 }
@@ -561,7 +568,9 @@ void HexView::updateLayout() {
 
   updateScrollBars();
 
-  requestRhiUpdate(offsetChanged || asciiChanged, offsetChanged || asciiChanged);
+  requestRhiUpdate(offsetChanged || asciiChanged,
+                   offsetChanged || asciiChanged,
+                   offsetChanged || asciiChanged);
 }
 
 // Return total line count required to display file bytes at 16 bytes per line.
@@ -738,15 +747,18 @@ void HexView::setSelectedItems(const std::vector<const VGMItem*>& items,
 }
 
 // Update playback selections from active items and seed fade-out entries for removed ones.
-void HexView::setPlaybackSelectionsForItems(const std::vector<const VGMItem*>& items) {
-  std::vector<SelectionRange> next;
+void HexView::setPlaybackSelectionsForItems(const std::vector<const VGMItem*>& items,
+                                            const std::vector<QColor>& glowColors) {
+  std::vector<PlaybackSelection> next;
   next.reserve(items.size());
-  for (const auto* item : items) {
+  for (size_t i = 0; i < items.size(); ++i) {
+    const auto* item = items[i];
     if (!item) {
       continue;
     }
     const uint32_t length = item->length() > 0 ? item->length() : 1u;
-    next.push_back({item->offset(), length});
+    const QColor glowColor = (i < glowColors.size() && glowColors[i].isValid()) ? glowColors[i] : PLAYBACK_GLOW_FALLBACK;
+    next.push_back({item->offset(), length, glowColor});
   }
 
   // Track incoming active playback ranges for fast membership checks below.
@@ -796,7 +808,8 @@ void HexView::setPlaybackSelectionsForItems(const std::vector<const VGMItem*>& i
   }
 
   m_playbackSelections = std::move(next);
-  refreshSelectionVisuals(false);
+  updateHighlightState(false);
+  requestRhiUpdate(false, false, true);
 }
 
 // Clear playback selection set immediately or convert it into fading playback highlights.
@@ -828,7 +841,8 @@ void HexView::clearPlaybackSelections(bool fade) {
   } else {
     m_playbackFadeTimer.stop();
   }
-  refreshSelectionVisuals(false);
+  updateHighlightState(false);
+  requestRhiUpdate(false, false, true);
 }
 
 // Toggle playback-highlight mode and reconcile existing playback selection state.
@@ -844,7 +858,8 @@ void HexView::setPlaybackActive(bool active) {
     clearPlaybackSelections();
     return;
   }
-  refreshSelectionVisuals(false);
+  updateHighlightState(false);
+  requestRhiUpdate(false, false, true);
 }
 
 // Request another frame while playback/outline effects are animating.
@@ -1135,8 +1150,6 @@ HexViewFrame::Data HexView::captureRhiFrameData(float dpr) {
   frame.shadowBlur = m_shadowBlur;
   frame.shadowStrength = m_shadowStrength;
   frame.shadowOffset = m_shadowOffset;
-  frame.playbackGlowLow = m_playbackGlowLow;
-  frame.playbackGlowHigh = m_playbackGlowHigh;
   frame.playbackGlowStrength = m_playbackGlowStrength;
   frame.playbackGlowRadius = m_playbackGlowRadius;
   frame.shadowEdgeCurve = m_shadowEdgeCurve;
@@ -1145,32 +1158,12 @@ HexViewFrame::Data HexView::captureRhiFrameData(float dpr) {
   frame.windowColor = palette().color(QPalette::Window);
   frame.windowTextColor = palette().color(QPalette::WindowText);
 
-  frame.styleIds = &m_styleIds;
-  frame.styles.reserve(m_styles.size());
-  for (const auto& style : m_styles) {
-    frame.styles.push_back({style.bg, style.fg});
-  }
-
-  frame.selections.reserve(m_selections.size());
-  for (const auto& range : m_selections) {
-    frame.selections.push_back({range.offset, range.length});
-  }
-
-  frame.fadeSelections.reserve(m_fadeSelections.size());
-  for (const auto& range : m_fadeSelections) {
-    frame.fadeSelections.push_back({range.offset, range.length});
-  }
-
-  frame.playbackSelections.reserve(m_playbackSelections.size());
-  for (const auto& range : m_playbackSelections) {
-    frame.playbackSelections.push_back({range.offset, range.length});
-  }
-
-  frame.fadePlaybackSelections.reserve(m_fadePlaybackSelections.size());
-  for (const auto& fade : m_fadePlaybackSelections) {
-    frame.fadePlaybackSelections.push_back(
-        {{fade.range.offset, fade.range.length}, fade.alpha});
-  }
+  frame.styleIds = m_styleIds;
+  frame.styles = m_styles;
+  frame.selections = m_selections;
+  frame.fadeSelections = m_fadeSelections;
+  frame.playbackSelections = m_playbackSelections;
+  frame.fadePlaybackSelections = m_fadePlaybackSelections;
 
   ensureGlyphAtlas(dpr);
   if (m_glyphAtlas) {
@@ -1189,7 +1182,7 @@ void HexView::changeEvent(QEvent* event) {
       m_styles[0].bg = palette().color(QPalette::Window);
       m_styles[0].fg = palette().color(QPalette::WindowText);
     }
-    requestRhiUpdate(true, true);
+    requestRhiUpdate(true);
   }
   QAbstractScrollArea::changeEvent(event);
 }
@@ -1281,9 +1274,11 @@ void HexView::handleSeekPress(VGMItem* item, const QPoint& pos) {
     if (item != m_lastSeekItem) {
       m_lastSeekItem = item;
       seekToEventRequested(item);
+      notePreviewRequested(item, true);
     }
     showTooltip(item, pos);
   } else {
+    stopNotePreview();
     hideTooltip();
   }
 }
@@ -1291,14 +1286,21 @@ void HexView::handleSeekPress(VGMItem* item, const QPoint& pos) {
 void HexView::handleSelectionPress(int offset, VGMItem* item) {
   if (offset == -1) {
     selectionChanged(nullptr);
+    stopNotePreview();
     return;
   }
 
   m_selectedOffset = offset;
   if (item == m_selectedItem) {
     selectionChanged(nullptr);
+    stopNotePreview();
   } else {
     selectionChanged(item);
+    if (item) {
+      notePreviewRequested(item, false);
+    } else {
+      stopNotePreview();
+    }
   }
   hideTooltip();
 }
@@ -1309,8 +1311,13 @@ void HexView::handleSeekScrubDrag(int offset) {
       if (item != m_lastSeekItem) {
         m_lastSeekItem = item;
         seekToEventRequested(item);
+        notePreviewRequested(item, true);
       }
+    } else {
+      stopNotePreview();
     }
+  } else {
+    stopNotePreview();
   }
   hideTooltip();
 }
@@ -1318,6 +1325,7 @@ void HexView::handleSeekScrubDrag(int offset) {
 void HexView::handleSelectionDrag(int offset) {
   if (offset == -1) {
     selectionChanged(nullptr);
+    stopNotePreview();
     hideTooltip();
     return;
   }
@@ -1332,6 +1340,11 @@ void HexView::handleSelectionDrag(int offset) {
   auto* item = m_vgmfile->getItemAtOffset(offset, false);
   if (item != m_selectedItem) {
     selectionChanged(item);
+    if (item) {
+      notePreviewRequested(item, false);
+    } else {
+      stopNotePreview();
+    }
   }
   hideTooltip();
 }
@@ -1362,6 +1375,7 @@ void HexView::mousePressEvent(QMouseEvent* event) {
 void HexView::mouseReleaseEvent(QMouseEvent* event) {
   if (event->button() == Qt::LeftButton) {
     m_isDragging = false;
+    stopNotePreview();
     m_lastSeekItem = nullptr;
     const QPoint vp = viewport()->mapFromGlobal(QCursor::pos());
     handleTooltipHoverMove(vp, QApplication::keyboardModifiers());
@@ -1629,7 +1643,7 @@ void HexView::updatePlaybackFade() {
 void HexView::timerEvent(QTimerEvent* event) {
   if (event->timerId() == m_playbackFadeTimer.timerId()) {
     updatePlaybackFade();
-    requestRhiUpdate(false, true);
+    requestRhiUpdate(false, false, true);
     if (m_fadePlaybackSelections.empty()) {
       m_playbackFadeTimer.stop();
     }
@@ -1671,6 +1685,11 @@ void HexView::updateHighlightState(bool animateSelection) {
   setOverlayOpacity(OVERLAY_ALPHA_F);
   setShadowBlur(SHADOW_BLUR_RADIUS);
   setShadowOffset(QPointF(SHADOW_OFFSET_X, SHADOW_OFFSET_Y));
+}
+
+void HexView::stopNotePreview() {
+  emit notePreviewStopped();
+  m_lastSeekItem = nullptr;
 }
 
 // Show rich HTML tooltip for a hovered item, avoiding redundant re-show for same item.

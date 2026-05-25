@@ -3,7 +3,11 @@
  * Licensed under the zlib license,
  * refer to the included LICENSE.txt file
  */
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <optional>
+#include "ConversionContext.h"
 #include "SF2File.h"
 #include "version.h"
 #include "VGMInstrSet.h"
@@ -11,6 +15,85 @@
 #include "ScaleConversion.h"
 #include "Root.h"
 #include "VGMRgn.h"
+
+namespace {
+
+constexpr double kEmu8000InitialAttenuationScale = 2.5;
+constexpr double kSoundFontCentibelsPerDecibel = 10.0;
+constexpr double kSoundFontMaxInitialAttenuationCentibels = 1440.0;
+
+std::optional<SFModulator> sf2SourceForModSource(ModSource source) {
+  constexpr uint16_t midiContinuousController = 1u << 7;
+  constexpr uint16_t bipolar = 1u << 9;
+
+  if (auto controller = midiControllerForModSource(source)) {
+    return static_cast<SFModulator>(midiContinuousController | *controller);
+  }
+
+  switch (source) {
+    case ModSource::ChannelPressure:
+      return 13;
+    case ModSource::PolyPressure:
+      return 10;
+    case ModSource::PitchWheel:
+      return static_cast<SFModulator>(bipolar | 14);
+    case ModSource::None:
+      return std::nullopt;
+    default:
+      break;
+  }
+  return std::nullopt;
+}
+
+ModSource sourceForModulator(const SynthModulator& modulator, const ConversionContext& context) {
+  return modulator.source.value_or(context.synthSourceFor(SynthTarget::SoundFont, modulator.destination));
+}
+
+std::optional<SFModulator> sf2SourceForModulator(const SynthModulator& modulator, const ConversionContext& context) {
+  return sf2SourceForModSource(sourceForModulator(modulator, context));
+}
+
+SFGenerator sf2GeneratorForModDestination(ModDest destination) {
+  switch (destination) {
+    case ModDest::VibLfoToPitch:
+      return vibLfoToPitch;
+    case ModDest::VibLfoFreq:
+      return freqVibLFO;
+    case ModDest::VibLfoDelay:
+      return delayVibLFO;
+    case ModDest::ModLfoToVol:
+      return modLfoToVolume;
+    case ModDest::ModLfoFreq:
+      return freqModLFO;
+    case ModDest::ModLfoDelay:
+      return delayModLFO;
+    case ModDest::InitialAtten:
+      return initialAttenuation;
+  }
+  return endOper;
+}
+
+int16_t sf2AmountForModulator(const SynthModulator& modulator) {
+  return static_cast<int16_t>(std::clamp<int32_t>(
+      modulator.amount, std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max()));
+}
+
+int16_t sf2AmountForGenerator(const SynthGenerator& generator) {
+  return static_cast<int16_t>(std::clamp<int32_t>(
+      generator.amount, std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max()));
+}
+
+size_t numSf2ModulatorsForInstr(const SynthInstr* instr, const ConversionContext& context) {
+  return std::ranges::count_if(instr->modulators(), [&context](const auto& modulator) {
+    return sf2SourceForModulator(modulator, context).has_value();
+  });
+}
+
+bool hasInstrumentGlobalZone(const SynthInstr* instr, const ConversionContext& context) {
+  return !instr->generators().empty() || numSf2ModulatorsForInstr(instr, context) != 0;
+}
+
+} // namespace
 
 SF2InfoListChunk::SF2InfoListChunk(const std::string& name)
     : LISTChunk("INFO") {
@@ -46,7 +129,7 @@ int SF2File::numOfGeneratorsForRgn(SynthRgn* rgn) {
   return numOfGenerators;
 }
 
-SF2File::SF2File(SynthFile *synthfile)
+SF2File::SF2File(SynthFile* synthfile, const ConversionContext& context)
     : RiffFile(synthfile->m_name, "sfbk") {
 
   //***********
@@ -193,20 +276,23 @@ SF2File::SF2File(SynthFile *synthfile)
   Chunk *instCk = new Chunk("inst");
   instCk->setSize(static_cast<uint32_t>((synthfile->vInstrs.size() + 1) * sizeof(sfInst)));
   instCk->data = new uint8_t[instCk->size()];
-  uint16_t rgnCounter = 0;
+  uint16_t instBagCounter = 0;
   for (size_t i = 0; i < numInstrs; i++) {
     SynthInstr *instr = synthfile->vInstrs[i];
 
     sfInst inst{};
     memcpy(inst.achInstName, instr->name.c_str(), std::min(instr->name.length(), static_cast<size_t>(20)));
-    inst.wInstBagNdx = rgnCounter;
-    rgnCounter += instr->vRgns.size();
+    inst.wInstBagNdx = instBagCounter;
+    instBagCounter += static_cast<uint16_t>(instr->vRgns.size());
+    if (hasInstrumentGlobalZone(instr, context)) {
+      instBagCounter++;
+    }
 
     memcpy(instCk->data + (i * sizeof(sfInst)), &inst, sizeof(sfInst));
   }
   //  add terminal sfInst
   sfInst inst{};
-  inst.wInstBagNdx = rgnCounter;
+  inst.wInstBagNdx = instBagCounter;
   memcpy(instCk->data + (numInstrs * sizeof(sfInst)), &inst, sizeof(sfInst));
   pdtaCk->addChildChunk(instCk);
 
@@ -215,42 +301,83 @@ SF2File::SF2File(SynthFile *synthfile)
   //***********
   Chunk *ibagCk = new Chunk("ibag");
 
-  uint32_t numTotalRgns = 0;
-  for (size_t i = 0; i < numInstrs; i++)
-    numTotalRgns += synthfile->vInstrs[i]->vRgns.size();
-
-  ibagCk->setSize((numTotalRgns + 1) * sizeof(sfInstBag));
-  ibagCk->data = new uint8_t[ibagCk->size()];
-
-  rgnCounter = 0;
-  int instGenCounter = 0;
+  uint32_t numTotalInstBags = 0;
   for (size_t i = 0; i < numInstrs; i++) {
     SynthInstr *instr = synthfile->vInstrs[i];
+    numTotalInstBags += static_cast<uint32_t>(instr->vRgns.size());
+    if (hasInstrumentGlobalZone(instr, context)) {
+      numTotalInstBags++;
+    }
+  }
+
+  ibagCk->setSize((numTotalInstBags + 1) * sizeof(sfInstBag));
+  ibagCk->data = new uint8_t[ibagCk->size()];
+
+  instBagCounter = 0;
+  int instGenCounter = 0;
+  int instModCounter = 0;
+  for (size_t i = 0; i < numInstrs; i++) {
+    SynthInstr *instr = synthfile->vInstrs[i];
+
+    if (hasInstrumentGlobalZone(instr, context)) {
+      sfInstBag globalInstBag{};
+      globalInstBag.wInstGenNdx = static_cast<uint16_t>(instGenCounter);
+      globalInstBag.wInstModNdx = static_cast<uint16_t>(instModCounter);
+      instGenCounter += static_cast<int>(instr->generators().size());
+      instModCounter += static_cast<int>(numSf2ModulatorsForInstr(instr, context));
+      memcpy(ibagCk->data + (instBagCounter++ * sizeof(sfInstBag)), &globalInstBag, sizeof(sfInstBag));
+    }
 
     size_t numRgns = instr->vRgns.size();
     for (size_t j = 0; j < numRgns; j++) {
       sfInstBag instBag{};
-      instBag.wInstGenNdx = instGenCounter;
+      instBag.wInstGenNdx = static_cast<uint16_t>(instGenCounter);
       instGenCounter += numOfGeneratorsForRgn(instr->vRgns[j]);
-      instBag.wInstModNdx = 0;
+      instBag.wInstModNdx = static_cast<uint16_t>(instModCounter);
 
-      memcpy(ibagCk->data + (rgnCounter++ * sizeof(sfInstBag)), &instBag, sizeof(sfInstBag));
+      memcpy(ibagCk->data + (instBagCounter++ * sizeof(sfInstBag)), &instBag, sizeof(sfInstBag));
     }
   }
   //  add terminal sfInstBag
   sfInstBag instBag{};
-  instBag.wInstGenNdx = instGenCounter;
-  instBag.wInstModNdx = 0;
-  memcpy(ibagCk->data + (rgnCounter * sizeof(sfInstBag)), &instBag, sizeof(sfInstBag));
+  instBag.wInstGenNdx = static_cast<uint16_t>(instGenCounter);
+  instBag.wInstModNdx = static_cast<uint16_t>(instModCounter);
+  memcpy(ibagCk->data + (instBagCounter * sizeof(sfInstBag)), &instBag, sizeof(sfInstBag));
   pdtaCk->addChildChunk(ibagCk);
 
   //***********
   // imod chunk
   //***********
+  uint32_t numTotalMods = 1;
+  for (const auto instr : synthfile->vInstrs) {
+    if (hasInstrumentGlobalZone(instr, context)) {
+      numTotalMods += static_cast<uint32_t>(numSf2ModulatorsForInstr(instr, context));
+    }
+  }
+
   Chunk *imodCk = new Chunk("imod");
-  //  create the terminal field
-  memset(&modList, 0, sizeof(sfModList));
-  imodCk->setData(&modList, sizeof(sfModList));
+  imodCk->setSize(numTotalMods * sizeof(sfInstModList));
+  imodCk->data = new uint8_t[imodCk->size()];
+  dataPtr = 0;
+  for (const auto instr : synthfile->vInstrs) {
+    for (const auto& modulator : instr->modulators()) {
+      const auto source = sf2SourceForModulator(modulator, context);
+      if (!source.has_value()) {
+        continue;
+      }
+
+      sfInstModList instModList{};
+      instModList.sfModSrcOper = *source;
+      instModList.sfModDestOper = sf2GeneratorForModDestination(modulator.destination);
+      instModList.modAmount = sf2AmountForModulator(modulator);
+      instModList.sfModAmtSrcOper = 0;
+      instModList.sfModTransOper = linear;
+      memcpy(imodCk->data + dataPtr, &instModList, sizeof(sfInstModList));
+      dataPtr += sizeof(sfInstModList);
+    }
+  }
+  sfInstModList instModList{};
+  memcpy(imodCk->data + dataPtr, &instModList, sizeof(sfInstModList));
   pdtaCk->addChildChunk(imodCk);
 
   //***********
@@ -258,6 +385,7 @@ SF2File::SF2File(SynthFile *synthfile)
   //***********
   u32 numTotalGens = 1;
   for (const auto instr : synthfile->vInstrs) {
+    numTotalGens += static_cast<uint32_t>(instr->generators().size());
     for (const auto rgn : instr->vRgns) {
       numTotalGens += numOfGeneratorsForRgn(rgn);
     }
@@ -269,6 +397,14 @@ SF2File::SF2File(SynthFile *synthfile)
   dataPtr = 0;
   for (size_t i = 0; i < numInstrs; i++) {
     SynthInstr *instr = synthfile->vInstrs[i];
+
+    for (const auto& generator : instr->generators()) {
+      sfInstGenList instGenList{};
+      instGenList.sfGenOper = sf2GeneratorForModDestination(generator.destination);
+      instGenList.genAmount.shAmount = sf2AmountForGenerator(generator);
+      memcpy(igenCk->data + dataPtr, &instGenList, sizeof(sfInstGenList));
+      dataPtr += sizeof(sfInstGenList);
+    }
 
     size_t numRgns = instr->vRgns.size();
     for (size_t j = 0; j < numRgns; j++) {
@@ -291,9 +427,14 @@ SF2File::SF2File(SynthFile *synthfile)
 
       // initialAttenuation
       instGenList.sfGenOper = initialAttenuation;
+      // INFO.isng declares EMU8000. EMU-compatible SF2 synths apply a 0.4
+      // factor to generator 48, so store the reciprocal to preserve SynthFile's
+      // dB attenuation.
       u16 atten = static_cast<u16>(std::clamp(
-        std::round((rgn->attenDb + rgn->sampinfo->attenuation) * 10.0),
-        0.0, 1440.0));
+        std::round((rgn->attenDb + rgn->sampinfo->attenuation) *
+                   kSoundFontCentibelsPerDecibel *
+                   kEmu8000InitialAttenuationScale),
+        0.0, kSoundFontMaxInitialAttenuationCentibels));
       instGenList.genAmount.wAmount = atten;
       memcpy(igenCk->data + dataPtr, &instGenList, sizeof(sfInstGenList));
       dataPtr += sizeof(sfInstGenList);

@@ -1,5 +1,6 @@
 #pragma once
 #include "VGMSeq.h"
+#include "automation/SeqMidiAutomation.h"
 #include "SeqTrack.h"
 #include "AkaoSnesFormat.h"
 
@@ -103,7 +104,8 @@ class AkaoSnesSeq
   bool parseTrackPointers() override;
   void resetVars() override;
 
-  double getTempoInBPM(uint8_t tempo) const;
+  double getTempoInBPM(uint8_t tempoValue) const;
+  void syncTempoDependentTracks();
 
   uint16_t romAddressToApuAddress(uint16_t romAddress) const;
   uint16_t getShortAddress(uint32_t offset) const;
@@ -119,6 +121,7 @@ class AkaoSnesSeq
 
   uint8_t TIMER0_FREQUENCY;
   bool PAN_8BIT;
+  uint8_t tempo;
 
   uint32_t addrAPURelocBase;
   uint32_t addrROMRelocBase;
@@ -133,12 +136,40 @@ class AkaoSnesTrack : public SeqTrack {
 public:
   AkaoSnesTrack(AkaoSnesSeq *parentFile, uint32_t offset = 0, uint32_t length = 0);
   void resetVars() override;
+  void onTickBegin() override;
   bool readEvent() override;
+  void syncTempoDependentLfos();
 
   uint16_t romAddressToApuAddress(uint16_t romAddress) const;
   uint16_t getShortAddress(uint32_t offset) const;
 
  private:
+  enum class LfoTarget {
+    Vibrato,
+    Tremolo,
+  };
+
+  struct LfoParams {
+    uint8_t delay;
+    uint8_t rate;
+    uint8_t depth;
+  };
+
+  LfoParams readLfoParams();
+  void applyLfo(LfoTarget target, uint32_t offset, uint32_t length, const LfoParams& params);
+  void clearLfo(LfoTarget target, uint32_t offset, uint32_t length);
+  void setLfoOutputDepth(LfoTarget target, uint8_t depth, bool force);
+  void clearLfoRateAndDelay(LfoTarget target);
+  void syncLfoRateAndDelay(LfoTarget target);
+  void configureVibratoFade();
+  void configureTremoloFade();
+  void beginVibratoForNote();
+  void beginTremoloForNote();
+  uint8_t vibratoFadeDepthMidiValue(int32_t depth) const;
+  uint8_t tremoloFadeDepthMidiValue(int32_t depth) const;
+  void updateVibratoFade();
+  void updateTremoloFade();
+
   uint8_t onetimeDuration;
   bool slur;
   bool legato;
@@ -152,4 +183,7 @@ public:
   uint16_t loopStart[AKAOSNES_LOOP_LEVEL_MAX];
 
   uint8_t ignoreMasterVolumeProgNum;
+
+  SeqSynthLfoAutomation vibrato;
+  SeqSynthLfoAutomation tremolo;
 };

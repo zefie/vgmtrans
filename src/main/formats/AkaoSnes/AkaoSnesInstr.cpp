@@ -4,8 +4,11 @@
  * refer to the included LICENSE.txt file
  */
 
+#include <algorithm>
+#include <cmath>
 #include <spdlog/fmt/fmt.h>
 #include "AkaoSnesInstr.h"
+#include "AkaoSnesModulation.h"
 #include "SNESDSP.h"
 
 // ****************
@@ -132,6 +135,11 @@ bool AkaoSnesInstr::loadInstr() {
     return false;
   }
 
+  addStandardVibratoHandling(akao_snes::modulation::vibratoSpec(version));
+  if (akao_snes::modulation::exportsTremolo(version)) {
+    addStandardTremoloHandling(akao_snes::modulation::tremoloSpec(version));
+  }
+
   uint16_t addrSampStart = readShort(offDirEnt);
 
   AkaoSnesRgn *rgn = new AkaoSnesRgn(this, version, addrTuningTable);
@@ -170,6 +178,11 @@ bool AkaoSnesDrumKit::loadInstr() {
   uint32_t offDirEnt = spcDirAddr + (instrNum * 4);
   if (offDirEnt + 4 > 0x10000) {
     return false;
+  }
+
+  addStandardVibratoHandling(akao_snes::modulation::vibratoSpec(version));
+  if (akao_snes::modulation::exportsTremolo(version)) {
+    addStandardTremoloHandling(akao_snes::modulation::tremoloSpec(version));
   }
 
   uint8_t NOTE_DUR_TABLE_SIZE;

@@ -5,7 +5,10 @@
  */
 #include <sstream>
 #include "CapcomSnesSeq.h"
+#include "CapcomSnesDefinitions.h"
+#include "Modulation.h"
 #include "ScaleConversion.h"
+#include "automation/SeqTrackAutomation.h"
 
 DECLARE_FORMAT(CapcomSnes);
 
@@ -163,9 +166,49 @@ void CapcomSnesTrack::resetVars() {
   durationRate = 0;
   transpose = 0;
   lastNoteSlurred = false;
+  didRest = false;
   lastKey = -1;
+  vibrato.reset();
+  tremolo.reset();
+  lastPortamentoTime = 0;
+  portamentoMillisecondsPerCent = 0;
+
   for (uint8_t& i : repeatCount) {
     i = 0;
+  }
+}
+
+void CapcomSnesTrack::setLfoOutputsEnabled(bool enabled) {
+  if (vibrato.depth() != 0) {
+    emitVibratoDepth(vibrato, vibrato.outputDepthWhen(enabled));
+  }
+  if (tremolo.depth() != 0) {
+    emitTremoloDepth(tremolo, tremolo.outputDepthWhen(enabled));
+  }
+}
+
+void CapcomSnesTrack::addVibratoDepthEvent(uint32_t offset, uint32_t length, uint8_t depth) {
+  bool isNewOffset = onEvent(offset, length);
+  vibrato.setDepth(depth);
+
+  // Record the stored depth, but emit zero while the driver has the LFO disabled.
+  recordSeqEvent<ModulationSeqEvent>(isNewOffset, getTime(), depth, offset, length, "Vibrato Depth");
+  emitVibratoDepth(vibrato, vibrato.outputDepthWhen(areLfoOutputsEnabled()), true);
+}
+
+void CapcomSnesTrack::handleLfoRateChange(uint8_t lfoRateByte) {
+  const bool wasEnabled = areLfoOutputsEnabled();
+  vibrato.setRate(lfoRateByte);
+  tremolo.setRate(lfoRateByte);
+  const bool isEnabled = areLfoOutputsEnabled();
+
+  // Rate 0 gates the active LFOs off without clearing the stored depths.
+  if (!isEnabled && wasEnabled) {
+    setLfoOutputsEnabled(false);
+  }
+  else if (isEnabled && !wasEnabled) {
+    // Reactivate vibrato and tremolo if appropriate
+    setLfoOutputsEnabled(true);
   }
 }
 
@@ -233,6 +276,124 @@ void CapcomSnesTrack::setNoteSlurred(bool slurred) {
 double CapcomSnesTrack::getTuningInSemitones(int8_t tuning) {
   return tuning / 256.0;
 }
+namespace {
+
+constexpr int kVolumeCurveLastIndex = 16;
+constexpr int kTremoloPeakScalarV1 = 255;
+constexpr int kTremoloPeakScalarV2 = 250;
+constexpr double kTremoloMuteFloorCentibels = 960.0;
+
+struct PanConversionResult {
+  uint8_t midiPan;
+  double volumeScale;
+};
+
+int interpolatePanFactor(uint16_t panPosition) {
+  const int panIndex = panPosition >> 8;
+  const int panRate = panPosition & 0xff;
+  const int lower = CapcomSnesSeq::panTable[panIndex];
+  const int upper = CapcomSnesSeq::panTable[panIndex + 1];
+  return lower + ((upper - lower) * panRate >> 8);
+}
+
+PanConversionResult calculatePanV2(uint8_t biasedPan) {
+  const uint16_t rightPanPosition = static_cast<uint16_t>(biasedPan) * 20;
+  const uint16_t leftPanPosition = 0x1400 - rightPanPosition;
+  const double volumeLeft = interpolatePanFactor(leftPanPosition) / 128.0;
+  const double volumeRight = interpolatePanFactor(rightPanPosition) / 128.0;
+
+  PanConversionResult result{};
+  result.midiPan = convertVolumeBalanceToStdMidiPan(volumeLeft, volumeRight, &result.volumeScale);
+  return result;
+}
+
+int interpolateVolumeCurve(int curveIndex, int curveFraction) {
+  if (curveIndex >= kVolumeCurveLastIndex) {
+    return CapcomSnesSeq::volTable[kVolumeCurveLastIndex]; // 0xff
+  }
+
+  const int lower = CapcomSnesSeq::volTable[curveIndex];
+  const int upper = CapcomSnesSeq::volTable[curveIndex + 1];
+  return lower + (((upper - lower) * curveFraction) >> 8);
+}
+
+int calculateVolumeScalar(uint8_t sourceVolume) {
+  // The driver's intended range is 0x00..0x80 with 0x80 resolving to full volume.
+  if (sourceVolume >= 0x80) {
+    return CapcomSnesSeq::volTable[kVolumeCurveLastIndex]; // 0xff
+  }
+  const int curveIndex = sourceVolume >> 3;
+  const int curveFraction = ((sourceVolume & 0x07) << 5) | 0x1f;
+
+  return interpolateVolumeCurve(curveIndex, curveFraction);
+}
+
+double calculateVolumeV2(uint8_t sourceVolume) {
+  const int scalar = calculateVolumeScalar(sourceVolume); // 0..255
+  return static_cast<double>(scalar) / 255.0;
+}
+
+int calculateTremoloScalarAtTroughV1(int sourceDepth) {
+  const int depth = sourceDepth & 0x7f;
+
+  if (depth == 0)
+    return 255;
+
+  return 255 - ((2 * depth * 255) >> 8);
+}
+
+int calculateTremoloScalarAtTroughV2(int sourceDepth) {
+  // The V2 handler uses the volume curve table
+  sourceDepth = std::clamp(sourceDepth, 0, 127);
+
+  if (sourceDepth == 0)
+    return 250;
+  if (sourceDepth == 127)
+    return 0;
+
+  // Tremolo depth walks the same loudness curve as volume, but in reverse.
+  const int inverseCurvePosition = 0x7E81 - sourceDepth * 255;
+  const int scaledCurvePosition = inverseCurvePosition >> 3;
+  return interpolateVolumeCurve(scaledCurvePosition >> 8, scaledCurvePosition & 0xff);
+}
+
+int convertTremoloDepthToMidiValue(int sourceDepth, CapcomSnesVersion version) {
+  int peakScalar;
+  int troughScalar;
+
+  if (version == CAPCOMSNES_V1_BGM_IN_LIST) {
+    peakScalar = kTremoloPeakScalarV1;
+    troughScalar = calculateTremoloScalarAtTroughV1(sourceDepth);
+  }
+  else {
+    peakScalar = kTremoloPeakScalarV2;
+    troughScalar = calculateTremoloScalarAtTroughV2(sourceDepth);
+  }
+  double depthCentibels = kTremoloMuteFloorCentibels;
+
+  if (troughScalar > 0) {
+    depthCentibels = 200.0 * log10(peakScalar / static_cast<double>(troughScalar));
+    depthCentibels = std::clamp(depthCentibels, 0.0, kTremoloMuteFloorCentibels);
+  }
+
+  // SF2 tremolo depth is expressed as +/- modLfoToVolume, so the MIDI value must map to the full range, not just half.
+  const int midiValue = static_cast<int>(
+      floor(depthCentibels * 128.0 / (2.0 * static_cast<double>(capcom_snes::kTremoloHalfDepthCentibels)) + 0.5));
+  return std::clamp(midiValue, 0, 127);
+}
+
+uint8_t convertLfoRateByteToMidiVal(uint8_t freqByte) {
+  if (freqByte == 0)
+    return 0; // this is a special-case that disables the LFO
+
+  // The driver stores rate as a multiple of a fixed LFO step; the shared helper
+  // handles the Hz -> 7-bit MIDI mapping that matches the instrument modulator.
+  return midiValueForHertzInRange(static_cast<double>(freqByte) * capcom_snes::kLfoStepHz,
+                                  capcom_snes::kVibratoBaseHz,
+                                  capcom_snes::kVibratoMaxHz);
+}
+
+}  // namespace
 
 bool CapcomSnesTrack::readEvent() {
   CapcomSnesSeq *parentSeq = static_cast<CapcomSnesSeq*>(this->parentSeq);
@@ -245,6 +406,15 @@ bool CapcomSnesTrack::readEvent() {
   bool bContinue = true;
 
   std::string desc;
+  auto applyNoteAttributes = [this](uint8_t attributes) {
+    const bool wasSlurred = isNoteSlurred();
+    noteAttributes &= ~(CAPCOM_SNES_MASK_NOTE_OCTAVE_UP | CAPCOM_SNES_MASK_NOTE_TRIPLET | CAPCOM_SNES_MASK_NOTE_SLURRED);
+    noteAttributes |= attributes;
+
+    if (isNoteSlurred() != wasSlurred) {
+      addLegatoPedalNoItem(isNoteSlurred());
+    }
+  };
 
   if (statusByte >= 0x20) {
     uint8_t keyIndex = statusByte & 0x1f;
@@ -272,7 +442,7 @@ bool CapcomSnesTrack::readEvent() {
 
     if (rest) {
       addRest(beginOffset, curOffset - beginOffset, len);
-      lastKey = -1;
+      didRest = true;
     }
     else {
       // calculate duration of note:
@@ -299,16 +469,25 @@ bool CapcomSnesTrack::readEvent() {
 
       uint8_t key = (keyIndex - 1) + (getNoteOctave() * 12) + (isNoteOctaveUp() ? 24 : 0);
       uint8_t vel = 127;
-      if (lastNoteSlurred && key == lastKey) {
+      if (lastNoteSlurred && key == lastKey && !didRest) {
         addTime(dur);
         makePrevDurNoteEnd();
         addTime(len - dur);
         addTie(beginOffset, curOffset - beginOffset, dur, "Tie", desc);
       }
       else {
-        addNoteByDur(beginOffset, curOffset - beginOffset, key, vel, dur);
+        if (portamentoMillisecondsPerCent > 0 && lastKey >= 0) {
+          uint16_t portamentoDurInMillis = (abs(key - lastKey) * 100) * portamentoMillisecondsPerCent;
+          if (portamentoDurInMillis != lastPortamentoTime) {
+            addPortamentoTime14BitNoItem(portamentoDurInMillis);
+            lastPortamentoTime = portamentoDurInMillis;
+          }
+          addPortamentoControlNoItem(lastKey);
+        }
+        addNoteByDur(beginOffset, curOffset - beginOffset, key, vel, dur + (isNoteSlurred() ? 1 : 0));
         addTime(len);
         lastKey = key;
+        didRest = false;
       }
       lastNoteSlurred = isNoteSlurred();
     }
@@ -368,6 +547,7 @@ bool CapcomSnesTrack::readEvent() {
 
       case EVENT_TOGGLE_SLUR:
         setNoteSlurred(!isNoteSlurred());
+        addLegatoPedalNoItem(isNoteSlurred());
         addGenericEvent(beginOffset, curOffset - beginOffset, "Toggle Slur/Tie", "", Type::Portamento);
         break;
 
@@ -383,8 +563,7 @@ bool CapcomSnesTrack::readEvent() {
 
       case EVENT_NOTE_ATTRIBUTES: {
         uint8_t attributes = readByte(curOffset++);
-        noteAttributes &= ~(CAPCOM_SNES_MASK_NOTE_OCTAVE_UP | CAPCOM_SNES_MASK_NOTE_TRIPLET | CAPCOM_SNES_MASK_NOTE_SLURRED);
-        noteAttributes |= attributes;
+        applyNoteAttributes(attributes);
         desc = fmt::format("Triplet: {}  Slur: {}  2-Octave Up: {}",
                         isNoteTriplet() ? "On" : "Off",
                         isNoteSlurred() ? "On" : "Off",
@@ -419,20 +598,15 @@ bool CapcomSnesTrack::readEvent() {
       case EVENT_VOLUME: {
         uint8_t newVolume = readByte(curOffset++);
 
-        uint8_t midiVolume;
         if (parentSeq->version == CAPCOMSNES_V1_BGM_IN_LIST) {
           // linear volume
-          midiVolume = newVolume >> 1;
+          addVol(beginOffset, curOffset - beginOffset, newVolume >> 1);
         }
         else {
-          // use volume table (with linear interpolation)
-          uint8_t volIndex = (newVolume * 16) >> 8;
-          uint8_t volRate = (newVolume * 16) & 0xff;
-          midiVolume = CapcomSnesSeq::volTable[volIndex]
-              + ((CapcomSnesSeq::volTable[volIndex + 1] - CapcomSnesSeq::volTable[volIndex]) * volRate / 256);
+          // V2/V3 drivers shape volume through the engine's 17-point loudness curve.
+          double percentAmp = calculateVolumeV2(newVolume);
+          addVol(beginOffset, curOffset - beginOffset, percentAmp, Resolution::FourteenBit);
         }
-
-        addVol(beginOffset, curOffset - beginOffset, midiVolume);
         break;
       }
 
@@ -470,15 +644,20 @@ bool CapcomSnesTrack::readEvent() {
       }
 
       case EVENT_PORTAMENTO_TIME: {
-        // TODO: calculate portamento time in milliseconds
-        uint8_t newPortamentoTime = readByte(curOffset++);
+        // All tested versions of the format (V1-V3) use the same calculation for portamento time.
+        uint8_t portamentoTimeByte = readByte(curOffset++);
+        uint8_t step = (portamentoTimeByte << 1) & 0xFF;
+        double centsPerUpdate = step * (100.0 / 256.0);
+        // The voice stream/portamento update runs once every other 8 ms timer tick, i.e. about 62.5 updates per second
+        if (centsPerUpdate == 0)
+          portamentoMillisecondsPerCent = 0;
+        else
+          portamentoMillisecondsPerCent = (0.016 / centsPerUpdate) * 1000;
         addGenericEvent(beginOffset,
                         curOffset - beginOffset,
                         "Portamento Time",
-                        fmt::format("Time: {:d}", newPortamentoTime),
+                        fmt::format("cents/ms: {:.2f}", centsPerUpdate * 62.5 / 1000.0),
                         Type::PortamentoTime);
-        addPortamentoTimeNoItem(newPortamentoTime >> 1);
-        addPortamentoNoItem(newPortamentoTime != 0);
         break;
       }
 
@@ -563,8 +742,7 @@ bool CapcomSnesTrack::readEvent() {
 
         if (repeatCount[repeatSlot] == 1) {
           repeatCount[repeatSlot] = 0;
-          noteAttributes &= ~(CAPCOM_SNES_MASK_NOTE_OCTAVE_UP | CAPCOM_SNES_MASK_NOTE_TRIPLET | CAPCOM_SNES_MASK_NOTE_SLURRED);
-          noteAttributes |= attributes;
+          applyNoteAttributes(attributes);
           curOffset = dest;
         }
 
@@ -600,51 +778,67 @@ bool CapcomSnesTrack::readEvent() {
 
       case EVENT_PAN: {
         uint8_t newPan = readByte(curOffset++) + 0x80; // signed -> unsigned
-        double volumeScale;
-
-        uint8_t panIn7bit;
+        PanConversionResult pan{};
         if (parentSeq->version == CAPCOMSNES_V1_BGM_IN_LIST) {
-          panIn7bit = newPan >> 1;
+          pan.midiPan = convert7bitLinearPercentPanValToStdMidiVal(newPan >> 1, &pan.volumeScale);
         }
         else {
-          // use pan table (with linear interpolation)
-          uint8_t panIndex = (newPan * 20) >> 8;
-          uint8_t panRate = (newPan * 20) & 0xff;
-          panIn7bit = CapcomSnesSeq::panTable[panIndex]
-              + ((CapcomSnesSeq::panTable[panIndex + 1] - CapcomSnesSeq::panTable[panIndex]) * panRate >> 8);
+          pan = calculatePanV2(newPan);
         }
-        uint8_t midiPan = convert7bitLinearPercentPanValToStdMidiVal(panIn7bit, &volumeScale);
 
-        addPan(beginOffset, curOffset - beginOffset, midiPan);
-        addExpressionNoItem(std::round(127.0 * volumeScale));
+        addPan(beginOffset, curOffset - beginOffset, pan.midiPan);
+        addExpressionNoItem(std::round(127.0 * pan.volumeScale));
         break;
       }
 
       case EVENT_MASTER_VOLUME: {
         uint8_t newVolume = readByte(curOffset++);
 
-        uint8_t midiVolume;
         if (parentSeq->version == CAPCOMSNES_V1_BGM_IN_LIST) {
           // linear volume
-          midiVolume = newVolume >> 1;
+          addMasterVol(beginOffset, curOffset - beginOffset, newVolume >> 1);
         }
         else {
-          // use volume table (with linear interpolation)
-          uint8_t volIndex = (newVolume * 16) >> 8;
-          uint8_t volRate = (newVolume * 16) & 0xff;
-          midiVolume = CapcomSnesSeq::volTable[volIndex]
-              + ((CapcomSnesSeq::volTable[volIndex + 1] - CapcomSnesSeq::volTable[volIndex]) * volRate / 256);
+          // Master volume follows the same loudness curve as per-track volume.
+          double percentAmp = calculateVolumeV2(newVolume);
+          addMasterVol(beginOffset, curOffset - beginOffset, percentAmp, Resolution::FourteenBit);
         }
-
-        addMasterVol(beginOffset, curOffset - beginOffset, midiVolume);
         break;
       }
 
       case EVENT_LFO: {
         uint8_t lfoType = readByte(curOffset++);
         uint8_t lfoAmount = readByte(curOffset++);
-        desc = fmt::format("Type: {:d}  Amount: {:d}", lfoType, lfoAmount);
-        addGenericEvent(beginOffset, curOffset - beginOffset, "LFO Param", desc, Type::Lfo);
+        switch (lfoType) {
+          case 0:
+            // Vibrato Depth
+            addVibratoDepthEvent(beginOffset, curOffset - beginOffset, lfoAmount & 0x7F);
+            break;
+          case 1:
+            // Tremolo Depth
+            tremolo.setDepth(convertTremoloDepthToMidiValue(lfoAmount, parentSeq->version));
+            emitTremoloDepth(tremolo, tremolo.outputDepthWhen(areLfoOutputsEnabled()), true);
+            desc = fmt::format("Amount: {:d}", lfoAmount);
+            addGenericEvent(beginOffset, curOffset - beginOffset, "Tremolo Depth", desc, Type::Lfo);
+            break;
+          case 2: {
+            // LFO Rate
+            handleLfoRateChange(lfoAmount);
+            const uint8_t lfoRateMidiValue = convertLfoRateByteToMidiVal(lfoAmount);
+            addVibratoFrequency(beginOffset,
+                                curOffset - beginOffset,
+                                lfoRateMidiValue,
+                                "LFO Rate");
+            addTremoloFrequencyNoItem(lfoRateMidiValue);
+            break;
+          }
+          case 3:
+            // Flag to reset LFO phase on note activation. 1 enables. 0 disables. V1: off by default, V2+: on by default
+            // SoundFont 2 and DLS always reset LFO phase when a note is activated. This cannot be changed.
+            desc = fmt::format("Type: {:d}  Amount: {:d}", lfoType, lfoAmount);
+            addGenericEvent(beginOffset, curOffset - beginOffset, "Reset LFO at Note On", desc, Type::Lfo);
+            break;
+        }
         break;
       }
 

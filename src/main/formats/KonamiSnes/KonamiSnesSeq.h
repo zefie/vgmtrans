@@ -4,7 +4,9 @@
  * refer to the included LICENSE.txt file
  */
 #pragma once
+#include <optional>
 #include "VGMSeq.h"
+#include "automation/SeqMidiAutomation.h"
 #include "SeqTrack.h"
 #include "SeqEvent.h"
 #include "KonamiSnesFormat.h"
@@ -33,12 +35,14 @@ enum KonamiSnesSeqEventType {
   EVENT_LOOP_START_2,
   EVENT_LOOP_END_2,
   EVENT_TEMPO,
-  EVENT_TEMPO_FADE,
+  EVENT_TEMPO_FADE_V1,
+  EVENT_TEMPO_FADE_V2,
   EVENT_TRANSPABS,
   EVENT_ADSR1,
   EVENT_ADSR2,
   EVENT_VOLUME,
-  EVENT_VOLUME_FADE,
+  EVENT_VOLUME_FADE_V1,
+  EVENT_VOLUME_FADE_V2,
   EVENT_PORTAMENTO,
   EVENT_PITCH_ENVELOPE_V1,
   EVENT_PITCH_ENVELOPE_V2,
@@ -50,10 +54,13 @@ enum KonamiSnesSeqEventType {
   EVENT_ECHO_PARAM,
   EVENT_LOOP_WITH_VOLTA_START,
   EVENT_LOOP_WITH_VOLTA_END,
-  EVENT_PAN_FADE,
+  EVENT_PAN_FADE_V1,
+  EVENT_PAN_FADE_V2,
   EVENT_VIBRATO_FADE,
   EVENT_ADSR_GAIN,
   EVENT_PROGCHANGEVOL,
+  EVENT_CONDITIONAL_JUMP_V1,
+  EVENT_LINEAR_PITCH_ENVELOPE_V2,
   EVENT_GOTO,
   EVENT_CALL,
   EVENT_END,
@@ -64,13 +71,17 @@ class KonamiSnesSeq
  public:
   KonamiSnesSeq
       (RawFile *file, KonamiSnesVersion ver, uint32_t seqdataOffset, std::string newName = "Konami SNES Seq");
-  virtual ~KonamiSnesSeq();
+  ~KonamiSnesSeq() override;
 
-  virtual bool parseHeader();
-  virtual bool parseTrackPointers();
-  virtual void resetVars();
+  bool parseHeader() override;
+  bool parseTrackPointers() override;
+  void resetVars() override;
 
   uint8_t tempo;
+  SeqFixedPointAutomation<> tempoFade;
+  uint32_t tempoFadeLastUpdatedTime;
+  uint8_t maxVibratoDepth;
+  uint16_t maxVibratoRateFactor;
 
   KonamiSnesVersion version;
   std::map<uint8_t, KonamiSnesSeqEventType> EventMap;
@@ -80,6 +91,7 @@ class KonamiSnesSeq
   static const uint8_t PAN_VOLUME_LEFT_V2[];
   static const uint8_t PAN_VOLUME_RIGHT_V2[];
   static const uint8_t PAN_TABLE[];
+  static const uint8_t VOL_TABLE[];
 
   uint8_t NOTE_DUR_RATE_MAX;
 
@@ -95,8 +107,9 @@ class KonamiSnesTrack
     : public SeqTrack {
  public:
   KonamiSnesTrack(KonamiSnesSeq *parentFile, uint32_t offset = 0, uint32_t length = 0);
-  virtual void resetVars();
-  virtual bool readEvent();
+  void resetVars() override;
+  bool readEvent() override;
+  void onTickBegin() override;
 
   uint8_t noteLength;
   uint8_t noteDurationRate;
@@ -118,8 +131,56 @@ class KonamiSnesTrack
   uint8_t instrument;
   int8_t prevNoteKey;
   bool prevNoteSlurred;
+  double seqTuningCents;
 
  private:
+  struct PitchSlide {
+    uint32_t offset;
+    uint8_t eventLength;
+    uint8_t delay;
+    uint8_t length;
+    uint8_t targetNote;
+    double targetSemitones = 0.0;
+    int16_t delta = 0;
+    double deltaSemitones = 0.0;
+  };
+
+  struct ControllerFade {
+    uint32_t offset;
+    SeqFixedPointMotionPlan<int32_t> motion;
+  };
+
+  std::optional<PitchSlide> consumePitchSlide();
+  PitchSlide readPitchSlide(KonamiSnesSeqEventType eventType, uint32_t offset);
+  void addPitchSlideEvent(const PitchSlide& slide);
+  void clearActivePitchSlide();
+  double noteSemitones(uint8_t key, bool includeTuning) const;
+  void resetPitchForNote(uint8_t key);
+  void beginPitchSlide(const PitchSlide& slide);
+  uint16_t pitchSlideRangeCents(const PitchSlide& slide) const;
+  uint8_t getNoteDuration(uint8_t length, uint8_t durationRate) const;
+  ControllerFade readVolumeFade(KonamiSnesSeqEventType eventType, uint32_t offset) const;
+  void applyCurrentVolume();
+  uint8_t defaultPanValue() const;
+  uint8_t clampPanValue(uint8_t pan) const;
+  uint8_t convertPanValueToMidiPan(uint8_t pan) const;
+  ControllerFade readPanFade(KonamiSnesSeqEventType eventType, uint32_t offset) const;
+  void applyCurrentPan();
+  ControllerFade readTempoFade(KonamiSnesSeqEventType eventType, uint32_t offset) const;
+  void applyCurrentTempo();
+  void syncVibratoRateAndDelay();
   double getTuningInSemitones(int8_t tuning);
   uint8_t convertGAINAmountToGAIN(uint8_t gainAmount);
+  int16_t getLoopVolumeDelta() const;
+  double getLoopPitchDeltaCents() const;
+  void applyEffectiveTuning(uint32_t offset, uint32_t length);
+  void addUnknownEvent(uint32_t beginOffset, uint8_t statusByte, uint8_t argCount);
+  void resetPanAfterProgramChange();
+  KonamiSnesSeq& seq();
+  const KonamiSnesSeq& seq() const;
+
+  SeqFixedPointAutomation<> panFade;
+  SeqFixedPointAutomation<> volumeFade;
+  SeqPitchBendAutomation<double> pitchSlide;
+  SeqSynthLfoAutomation vibrato;
 };

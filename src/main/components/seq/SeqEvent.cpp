@@ -120,6 +120,13 @@ MastVolSeqEvent::MastVolSeqEvent(SeqTrack *pTrack,
                                  const std::string &name)
     : SeqEvent(pTrack, offset, length, name, Type::MasterVolume), vol(volume) { }
 
+MastVolSeqEvent::MastVolSeqEvent(SeqTrack *pTrack,
+                                 double volume,
+                                 uint32_t offset,
+                                 uint32_t length,
+                                 const std::string &name)
+    : SeqEvent(pTrack, offset, length, name, Type::MasterVolume), percentVol(volume) { }
+
 // ****************
 // MastVolSlideSeqEvent
 // ****************
@@ -196,6 +203,17 @@ PitchBendSeqEvent::PitchBendSeqEvent(SeqTrack *pTrack,
                                      uint32_t length,
                                      const std::string &name)
     : SeqEvent(pTrack, offset, length, name, Type::PitchBend), pitchbend(thePitchBend) { }
+
+// ***********************
+// ChannelPressureSeqEvent
+// ***********************
+
+ChannelPressureSeqEvent::ChannelPressureSeqEvent(SeqTrack *pTrack,
+                                                 uint8_t thePressure,
+                                                 uint32_t offset,
+                                                 uint32_t length,
+                                                 const std::string &name)
+    : SeqEvent(pTrack, offset, length, name, Type::ChannelPressure), pressure(thePressure) { }
 
 // **********************
 // PitchBendRangeSeqEvent
@@ -353,5 +371,3 @@ TimeSigSeqEvent::TimeSigSeqEvent(SeqTrack *pTrack,
                                  const std::string &name)
     : SeqEvent(pTrack, offset, length, name, Type::TimeSignature), numer(numerator), denom(denominator),
       ticksPerQuarter(theTicksPerQuarter) { }
-
-

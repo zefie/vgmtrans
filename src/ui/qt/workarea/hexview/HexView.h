@@ -43,9 +43,9 @@ public:
   ~HexView() override;
   [[nodiscard]] static QFont defaultViewFont();
   void setSelectedItem(VGMItem* item);
-  void setSelectedItems(const std::vector<const VGMItem*>& items,
-                        const VGMItem* primaryItem = nullptr);
-  void setPlaybackSelectionsForItems(const std::vector<const VGMItem*>& items);
+  void setSelectedItems(const std::vector<const VGMItem*>& items, const VGMItem* primaryItem = nullptr);
+  void setPlaybackSelectionsForItems(const std::vector<const VGMItem*>& items,
+                                     const std::vector<QColor>& glowColors = {});
   void clearPlaybackSelections(bool fade = true);
   void setPlaybackActive(bool active);
   void requestPlaybackFrame();
@@ -69,6 +69,8 @@ public:
 signals:
   void selectionChanged(VGMItem* item);
   void seekToEventRequested(VGMItem* item);
+  void notePreviewRequested(VGMItem* item, bool includeActiveNotesAtTick);
+  void notePreviewStopped();
 
 protected:
   bool viewportEvent(QEvent* event) override;
@@ -83,19 +85,10 @@ protected:
   void timerEvent(QTimerEvent* event) override;
 
 private:
-  struct SelectionRange {
-    uint32_t offset;
-    uint32_t length;
-  };
-  struct FadePlaybackSelection {
-    SelectionRange range;
-    qint64 startMs = 0;
-    float alpha = 0.0f;
-  };
-  struct Style {
-    QColor bg;
-    QColor fg;
-  };
+  using SelectionRange = HexViewFrame::SelectionRange;
+  using PlaybackSelection = HexViewFrame::PlaybackSelection;
+  using FadePlaybackSelection = HexViewFrame::FadePlaybackSelection;
+  using Style = HexViewFrame::Style;
   enum class DragMode {
     Selection,
     SeekScrub,
@@ -112,6 +105,7 @@ private:
 
   static uint64_t selectionKey(uint32_t offset, uint32_t length);
   static uint64_t selectionKey(const SelectionRange& range);
+  static uint64_t selectionKey(const PlaybackSelection& range);
   static uint64_t selectionKey(const FadePlaybackSelection& selection);
 
   int hexXOffset() const;
@@ -123,7 +117,9 @@ private:
   void handleSeekPress(VGMItem* item, const QPoint& pos);
   void handleSelectionDrag(int offset);
   void handleSeekScrubDrag(int offset);
-  void requestRhiUpdate(bool markBaseDirty = false, bool markSelectionDirty = false);
+  void requestRhiUpdate(bool markBaseDirty = false,
+                        bool markSelectionDirty = false,
+                        bool markPlaybackDirty = false);
   void clearCurrentSelection(bool animateSelection);
   void selectCurrentItem(bool animateSelection);
   void refreshSelectionVisuals(bool animateSelection);
@@ -148,6 +144,7 @@ private:
   void updateHighlightState(bool animateSelection);
   void showTooltip(VGMItem* item, const QPoint& pos);
   void hideTooltip();
+  void stopNotePreview();
 
   VGMFile* m_vgmfile = nullptr;
   // Interaction state.
@@ -159,7 +156,7 @@ private:
   VGMItem* m_lastSeekItem = nullptr;
   std::vector<SelectionRange> m_selections;
   std::vector<SelectionRange> m_fadeSelections;
-  std::vector<SelectionRange> m_playbackSelections;
+  std::vector<PlaybackSelection> m_playbackSelections;
   std::vector<FadePlaybackSelection> m_fadePlaybackSelections;
   bool m_playbackActive = false;
 
@@ -184,8 +181,6 @@ private:
   QBasicTimer m_playbackFadeTimer;
   QBasicTimer m_outlineFadeTimer;
   QElapsedTimer m_outlineFadeClock;
-  QColor m_playbackGlowLow;
-  QColor m_playbackGlowHigh;
   float m_playbackGlowStrength = 1.0f;
   float m_playbackGlowRadius = 0.5f;
   float m_shadowEdgeCurve = 1.0f;
