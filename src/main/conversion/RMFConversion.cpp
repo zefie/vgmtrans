@@ -17,6 +17,7 @@
 #include <cmath>
 
 #include "common.h"
+#include "ConversionContext.h"
 #include "GenSnd.h"
 #include "LogManager.h"
 #include "MidiFile.h"
@@ -2007,7 +2008,8 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
     L_ERROR("Failed to create temporary SF2 for RMF bank authoring");
     return false;
   }
-  auto sf2file = std::unique_ptr<SF2File>(new SF2File(synthfile.get()));
+  const auto context = ConversionContext::fromOptions(ConversionOptions::the(), SynthTarget::SoundFont);
+  auto sf2file = std::make_unique<SF2File>(synthfile.get(), context);
   const std::vector<uint8_t> sf2_buffer = sf2file->saveToMem();
   if (sf2_buffer.empty()) {
     L_ERROR("Failed to serialize temporary SF2 for RMF bank authoring");
