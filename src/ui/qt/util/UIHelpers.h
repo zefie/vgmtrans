@@ -8,7 +8,8 @@
 
 #include <filesystem>
 #include <string>
-#include <vector>
+#include <string_view>
+
 #include <QColor>
 #include <QIcon>
 #include <QPalette>
