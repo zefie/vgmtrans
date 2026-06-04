@@ -22,10 +22,16 @@ VGMSeq::VGMSeq(const std::string &format, RawFile *file, u32 offset, u32 length,
       midi(nullptr),
       nNumTracks(0),
       readMode(READMODE_ADD_TO_UI),
+      tempoBPM(0),
       time(0),
-      m_use_monophonic_tracks(false),
-      m_use_linear_amplitude_scale(false),
-      m_use_linear_pan_amplitude_scale(false),
+      bLoadTickByTick(false),
+      bIncTickAfterProcessingTracks(true),
+      initialTempoBPM(120),
+      m_ppqn(0),
+      m_initial_volume(100),                    // GM standard (dls1 spec p16)
+      m_initial_expression(127),             //''
+      m_initial_reverb_level(40),                  // GM standard
+      m_initial_pitch_bend_range_cents(200), // GM standard.  Means +/- 2 semitones (4 total range)
       m_always_write_initial_tempo(false),
       m_always_write_initial_vol(false),
       m_always_write_initial_expression(false),
@@ -33,13 +39,9 @@ VGMSeq::VGMSeq(const std::string &format, RawFile *file, u32 offset, u32 length,
       m_always_write_initial_pitch_bend_range(false),
       m_always_write_initial_mono_mode(false),
       m_allow_discontinuous_track_data(false),
-      bLoadTickByTick(false),
-      bIncTickAfterProcessingTracks(true),
-      m_initial_volume(100),                    // GM standard (dls1 spec p16)
-      m_initial_expression(127),             //''
-      m_initial_reverb_level(40),                  // GM standard
-      m_initial_pitch_bend_range_cents(200), // GM standard.  Means +/- 2 semitones (4 total range)
-      initialTempoBPM(120),
+      m_use_monophonic_tracks(false),
+      m_use_linear_amplitude_scale(false),
+      m_use_linear_pan_amplitude_scale(false),
       m_use_reverb(false),
       m_track_control_flow_state(false) {
   setConversionContext(ConversionContext::fromOptions(ConversionOptions::the(), SynthTarget::SoundFont));
@@ -141,14 +143,14 @@ bool VGMSeq::postLoad() {
   return true;
 }
 
-bool VGMSeq::loadTracks(ReadMode readMode, u32 stopTime) {
+bool VGMSeq::loadTracks(ReadMode seqReadMode, u32 stopTime) {
   // set read mode
-  this->readMode = readMode;
+  this->readMode = seqReadMode;
   for (u32 trackNum = 0; trackNum < nNumTracks; trackNum++) {
-    aTracks[trackNum]->readMode = readMode;
+    aTracks[trackNum]->readMode = seqReadMode;
   }
 
-  if (readMode == READMODE_CONVERT_TO_MIDI) {
+  if (seqReadMode == READMODE_CONVERT_TO_MIDI) {
     m_timedEvents.clear();
   }
 
@@ -349,10 +351,10 @@ bool VGMSeq::saveAsMidi(const std::filesystem::path &filepath, const VGMColl* co
 bool VGMSeq::saveAsMidi(const std::filesystem::path& filepath,
                         const VGMColl* coll,
                         const ConversionContext& context) {
-  MidiFile *midi = this->convertToMidi(coll, context);
-  if (!midi)
+  MidiFile *midiFile = this->convertToMidi(coll, context);
+  if (!midiFile)
     return false;
-  bool result = midi->saveMidiFile(filepath);
-  delete midi;
+  bool result = midiFile->saveMidiFile(filepath);
+  delete midiFile;
   return result;
 }

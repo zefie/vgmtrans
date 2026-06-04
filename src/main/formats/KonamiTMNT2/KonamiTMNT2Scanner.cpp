@@ -121,6 +121,8 @@ void KonamiTMNT2Scanner::scan(RawFile * /*file*/, void *info) {
       break;
     case XEXEX:
       break;
+    case VERSION_UNDEFINED:
+      return;
   }
 }
 
@@ -159,12 +161,11 @@ std::vector<KonamiTMNT2Seq*> KonamiTMNT2Scanner::loadSeqTable(
       auto seqType = static_cast<KonamiTMNT2Seq::SeqType>(programRom->readByte(seqOffset));
       if (version == SSRIDERS) {
         switch (seqType) {
-          case 0: return std::pair{6, 2};
-          case 1: return std::pair{7, 3};
-          case 2: return std::pair{8, 3};
-          case 3:
-          default: return std::pair{8, 4};
+          case KonamiTMNT2Seq::ALL_CHANS: return std::pair{6, 2};
+          case KonamiTMNT2Seq::RESERVE_CHANS: return std::pair{7, 3};
+          case KonamiTMNT2Seq::ALL_CHANS_2: return std::pair{8, 3};
         }
+        return std::pair{8, 4};
       }
 
       return seqType == 0 ? std::pair{8, 4} : std::pair{6, 3};
@@ -180,13 +181,13 @@ std::vector<KonamiTMNT2Seq*> KonamiTMNT2Scanner::loadSeqTable(
     std::vector<u32> k053260TrkPtrs;
     ym2151TrkPtrs.reserve(numYM3151Tracks);
     k053260TrkPtrs.reserve(numK053260Tracks);
-    for (int i = 0; i < numYM3151Tracks; ++i) {
-      u16 offset = seqPtr + seqTypeLength + (i * 2);
+    for (int trk = 0; trk < numYM3151Tracks; ++trk) {
+      u16 offset = seqPtr + seqTypeLength + (trk * 2);
       trkList->addChild(offset, 2, "YM2151 Track Pointer");
       ym2151TrkPtrs.push_back(programRom->readShort(offset));
     }
-    for (int i = 0; i < numK053260Tracks; ++i) {
-      u16 offset = seqPtr + seqTypeLength + ((numYM3151Tracks + i) * 2);
+    for (int trk = 0; trk < numK053260Tracks; ++trk) {
+      u16 offset = seqPtr + seqTypeLength + ((numYM3151Tracks + trk) * 2);
       trkList->addChild(offset, 2, "K053260 Track Pointer");
       k053260TrkPtrs.push_back(programRom->readShort(offset));
     }
@@ -312,13 +313,13 @@ void KonamiTMNT2Scanner::scanTMNT2(
   std::vector<u32> drumTablePtrs;
   u32 minInstrPtr = std::numeric_limits<u32>::max();
   u32 minDrumPtr =  std::numeric_limits<u32>::max();
-  for (int i = instrTableAddrK053260; i < minInstrPtr && i < drumTableAddr; i += 2) {
+  for (u32 i = instrTableAddrK053260; i < minInstrPtr && i < drumTableAddr; i += 2) {
     u32 instrInfoPtr = programRom->readShort(i);
     minInstrPtr = std::min(minInstrPtr, instrInfoPtr);
     instrPtrs.push_back(instrInfoPtr);
   }
 
-  for (int i = drumTableAddr;; i += 2) {
+  for (u32 i = drumTableAddr;; i += 2) {
     u32 drumInfoPtr = programRom->readShort(i);
     minDrumPtr = std::min(minDrumPtr, drumInfoPtr);
     if (i == minDrumPtr)
@@ -459,7 +460,7 @@ void KonamiTMNT2Scanner::scanVendetta(
 
   // First gather the instrument pointers from the instrument table
   u32 minInstrPtr = std::numeric_limits<u32>::max();
-  for (int i = instrTableOffsetK053260; i < minInstrPtr; i += 2) {
+  for (u32 i = instrTableOffsetK053260; i < minInstrPtr; i += 2) {
     u32 instrInfoPtr = programRom->readShort(i);
     minInstrPtr = std::min(minInstrPtr, instrInfoPtr);
     instrPtrs.push_back(instrInfoPtr);

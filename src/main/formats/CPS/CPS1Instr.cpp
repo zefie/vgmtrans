@@ -56,6 +56,9 @@ bool CPS1SampleInstrSet::parseInstrPointers() {
         aInstrs.push_back(instr);
       }
       break;
+    case CPS1_VERSION_UNDEFINED:
+    default:
+      return false;
   }
   return true;
 }
@@ -69,8 +72,7 @@ CPS1SampColl::CPS1SampColl(RawFile *file,
                            u32 offset,
                            u32 length,
                            std::string name)
-    : VGMSampColl(CPS1Format::name, file, offset, length, std::move(name)),
-      instrset(theinstrset) {
+    : VGMSampColl(CPS1Format::name, file, offset, length, std::move(name)) {
 }
 
 
@@ -148,6 +150,9 @@ bool CPS1OPMInstrSet::parseInstrPointers() {
     case CPS1_V425:
       instrSize = sizeof(CPS1OPMInstrDataV4_25);
       break;
+    case CPS1_VERSION_UNDEFINED:
+    default:
+      return false;
   }
   numInstrs = std::min(length() / static_cast<u32>(instrSize), 128U);
 
@@ -189,9 +194,9 @@ bool CPS1OPMInstrSet::parseInstrPointers() {
         u8 resetLfo = (instrData.LFO_ENABLE_AND_WF >> 1) & 1;
         driverData.push_back(enableLfo);
         driverData.push_back(resetLfo);
-        for (int i = 0; i < 4; i ++) {
-          driverData.push_back(instrData.volData[i].key_scale);
-          driverData.push_back(instrData.volData[i].extra_atten);
+        for (int op = 0; op < 4; op ++) {
+          driverData.push_back(instrData.volData[op].key_scale);
+          driverData.push_back(instrData.volData[op].extra_atten);
         }
 
         addOPMInstrument(instrData.convertToOPMData(masterVol, name), "cps", std::move(driverData));
@@ -211,6 +216,9 @@ bool CPS1OPMInstrSet::parseInstrPointers() {
         instr->addChild(new VGMItem(this, instrOff+36, 4, "D1L_RR"));
         break;
       }
+      case CPS1_VERSION_UNDEFINED:
+      default:
+        return false;
     }
   }
   return true;

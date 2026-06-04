@@ -41,7 +41,8 @@ const u16 TamSoftPS1Seq::PITCH_TABLE[73] = {
 };
 
 TamSoftPS1Seq::TamSoftPS1Seq(RawFile *file, u32 offset, u8 theSong, const std::string &name)
-    : VGMSeq(TamSoftPS1Format::name, file, offset, 0, name), song(theSong), ps2(false), type(0) {
+    : VGMSeq(TamSoftPS1Format::name, file, offset, 0, name), song(theSong), type(0),
+      reverbDepth(0), ps2(false) {
   bLoadTickByTick = true;
   setUseLinearAmplitudeScale(true);
 
@@ -193,7 +194,7 @@ bool TamSoftPS1Track::readEvent() {
 
   std::string desc;
 
-  if (statusByte >= 0x00 && statusByte <= 0x7f) {
+  if (statusByte <= 0x7f) {
     // if status_byte == 0, it actually sets 0xffffffff to delta-time o_O
     desc = fmt::format("Delta Time: {:d}", statusByte);
     addGenericEvent(beginOffset, curOffset - beginOffset, "Delta Time", desc, Type::Rest);
@@ -244,7 +245,7 @@ bool TamSoftPS1Track::readEvent() {
       }
 
       case 0xE3: {
-        u16 a1 = readShort(curOffset);
+        // Operand: u16 a1.
         curOffset += 2;
         addUnknown(beginOffset, curOffset - beginOffset, "NOP", desc);
         break;
@@ -283,8 +284,8 @@ bool TamSoftPS1Track::readEvent() {
       }
 
       case 0xE6: {
-        u8 mode = readByte(curOffset++);
-        desc = fmt::format("Reverb Mode: {:d}", mode);
+        u8 rvbMode = readByte(curOffset++);
+        desc = fmt::format("Reverb Mode: {:d}", rvbMode);
         addGenericEvent(beginOffset, curOffset - beginOffset, "Reverb Mode", desc, Type::Reverb);
         break;
       }

@@ -34,8 +34,8 @@ KonamiArcadeSeq::KonamiArcadeSeq(
 
 void KonamiArcadeSeq::resetVars() {
   VGMSeq::resetVars();
-  u8 m_tempoSlideDuration = 0;
-  double m_tempoSlideIncrement = 0;
+  m_tempoSlideDuration = 0;
+  m_tempoSlideIncrement = 0;
 }
 
 bool KonamiArcadeSeq::parseHeader() {
@@ -53,8 +53,8 @@ bool KonamiArcadeSeq::parseTrackPointers() {
     // Check to see if this sequence uses 16 tracks or 8 tracks for games with only 1 K054539.
     // We'll check for any pattern of 0x0000 where the second set of track pointers would be, as this
     // is typically present.
-    for (int pos = offset() + 16; pos < offset() + 32; pos += 2) {
-      if (readWord(pos) == 0) {
+    for (u32 checkPos = offset() + 16; checkPos < offset() + 32; checkPos += 2) {
+      if (readWord(checkPos) == 0) {
         numTracks = 8;
         break;
       }
@@ -387,7 +387,8 @@ bool KonamiArcadeTrack::readEvent() {
         L_DEBUG("{} at {:X}: didn't apply portamento because note duration <= 2.", parentSeq->name(), beginOffset);
         addNoteByDur(beginOffset, curOffset - beginOffset, note, linearVel, actualDuration);
       }
-    } else if (m_slideModeDepth != 0 && m_slideModeDuration > 0 && actualDuration > (m_slideModeDelay + 1)) {
+    } else if (m_slideModeDepth != 0 && m_slideModeDuration > 0 &&
+               actualDuration > static_cast<u32>(m_slideModeDelay + 1)) {
       // Slide note
       u8 slideStartNote = note - m_slideModeDepth;
       addNoteByDurNoItem(slideStartNote, linearVel, m_slideModeDelay + 1);
@@ -554,9 +555,10 @@ bool KonamiArcadeTrack::readEvent() {
 
     // LFO settings (or perhaps just vibrato)
     case 0xE4: {
-      u8 depth = readByte(curOffset++); // lower seems to result in more effect. 7F turns off all vibrato regardless of amplitude.
-      u8 freq = readByte(curOffset++);  // higher results in faster fluctuation
-      u8 amplitude = readByte(curOffset++); // higher results in greater LFO effect
+      curOffset += 3;
+      // u8 depth = readByte(curOffset++); // lower seems to result in more effect. 7F turns off all vibrato regardless of amplitude.
+      // u8 freq = readByte(curOffset++);  // higher results in faster fluctuation
+      // u8 amplitude = readByte(curOffset++); // higher results in greater LFO effect
       addUnknown(beginOffset, curOffset - beginOffset, "Vibrato?");
       break;
     }
@@ -798,7 +800,7 @@ bool KonamiArcadeTrack::readEvent() {
     }
 
     case 0xF9: {
-      u8 data = readByte(curOffset++);
+      curOffset++;
       addUnknown(beginOffset, curOffset - beginOffset);
       break;
     }

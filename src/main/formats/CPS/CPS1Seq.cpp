@@ -7,8 +7,8 @@
 
 CPS1Seq::CPS1Seq(RawFile *file, u32 offset, CPS1FormatVer fmtVersion, std::string name, std::vector<s8> instrTransposeTable)
     : VGMSeq(CPS1Format::name, file, offset, 0, std::move(name)),
-      fmtVersion(fmtVersion),
-      instrTransposeTable(instrTransposeTable) {
+      instrTransposeTable(instrTransposeTable),
+      fmtVersion(fmtVersion) {
   setUsesMonophonicTracks();
   setAlwaysWriteInitialVol(127);
   setAlwaysWriteInitialMonoMode(true);
@@ -63,6 +63,8 @@ bool CPS1Seq::parseTrackPointers() {
       case CPS1_V502:
         newTrack = new CPS1TrackV2(this, i < 8 ? CPSSynth::YM2151 : CPSSynth::OKIM6295, trkOff + offset());
         break;
+      default:
+        return false;
     }
     aTracks.push_back(newTrack);
     header->addChild(offset() + 1 + (i * 2), 2, "Track Pointer");

@@ -220,9 +220,9 @@ bool CPS2TrackV1::readEvent() {
       }
 
       case 0x08 : {
-        u8 progNum = readByte(curOffset++);
-        addBankSelectNoItem((bank * 2) + (progNum / 128));
-        addProgramChange(beginOffset, curOffset - beginOffset, progNum % 128);
+        u8 prog = readByte(curOffset++);
+        addBankSelectNoItem((bank * 2) + (prog / 128));
+        addProgramChange(beginOffset, curOffset - beginOffset, prog % 128);
         break;
       }
 
@@ -403,7 +403,8 @@ bool CPS2TrackV1::readEvent() {
         break;
 
       case 0x1A : {
-        u8 masterVol = readByte(curOffset++);
+        // Operand: u8 masterVol.
+        curOffset++;
         addGenericEvent(beginOffset, curOffset - beginOffset, "Master Volume", "", Type::Unknown);
         // addMasterVol(beginOffset, curOffset-beginOffset, masterVol);
         break;

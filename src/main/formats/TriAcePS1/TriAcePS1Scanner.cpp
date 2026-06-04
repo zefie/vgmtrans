@@ -27,13 +27,13 @@ void TriAcePS1Scanner::searchForSLZSeq(RawFile *file) {
   size_t nFileLength = file->size();
   for (u32 i = 0; i + 0x40 < nFileLength; i++) {
     u32 sig1 = file->readWordBE(i);
-    u8 mode;
+    u8 slzMode;
 
-    mode = sig1 & 0xFF;
+    slzMode = sig1 & 0xFF;
     sig1 >>= 8;
     if (sig1 != 0x534C5A)    // "SLZ" in ASCII
       continue;
-    if (mode > 0x03)
+    if (slzMode > 0x03)
       continue;    // only SLZ v0-3 is supported
     // Note: SLZ v2 is used by a few tracks in Valkyrie Profile.
 
@@ -75,8 +75,8 @@ void TriAcePS1Scanner::searchForSLZSeq(RawFile *file) {
     std::string name = file->tag.hasTitle() ? file->tag.title : file->stem();
     VGMColl *coll = new VGMColl(name);
     coll->useSeq(seq);
-    for (u32 i = 0; i < instrsets.size(); i++)
-      coll->addInstrSet(instrsets[i]);
+    for (u32 setIdx = 0; setIdx < instrsets.size(); setIdx++)
+      coll->addInstrSet(instrsets[setIdx]);
     if (!coll->load()) {
       delete coll;
     }
@@ -131,10 +131,9 @@ void TriAcePS1Scanner::searchForInstrSet(RawFile *file, std::vector<TriAcePS1Ins
 // file is RawFile containing the compressed seq.  cfOff is the compressed file offset.
 TriAcePS1Seq *TriAcePS1Scanner::decompressTriAceSLZFile(RawFile *file, u32 cfOff) {
   u8 cmode = file->readByte(cfOff + 3);                //compression mode
-  u32 cfSize = file->readWord(cfOff + 4);            //compressed file size
+  // Header +4 is the compressed file size; +12 is the compressed block size.
   u32 ufSize =
       file->readWord(cfOff + 8);            //uncompressed file size (size of resulting file after decompression)
-  u32 blockSize = file->readWord(cfOff + 12);        //size of entire compressed block (slightly larger than cfSize)
 
   if (ufSize == 0)
     ufSize = DEFAULT_UFSIZE;

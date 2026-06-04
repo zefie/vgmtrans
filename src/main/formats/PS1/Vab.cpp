@@ -50,7 +50,7 @@ bool Vab::parseInstrPointers() {
   u32 offToneAttrs = offProgs + (16 * 128);
 
   u16 numPrograms = readShort(offset() + 0x12);
-  u16 numTones = readShort(offset() + 0x14);
+  // Header +0x14 stores the total tone count; program entries below carry the per-program counts.
   u16 numVAGs = readShort(offset() + 0x16);
 
   u32 offVAGOffsets = offToneAttrs + (32 * 16 * numPrograms);
@@ -96,16 +96,16 @@ bool Vab::parseInstrPointers() {
       readBytes(offCurrProg, 0x10, &newInstr->attr);
 
       const auto progName = fmt::format("Program {:d}", progIndex);
-      VGMHeader *hdr = progsHdr->addHeader(offCurrProg, 0x10, progName);
-      hdr->addChild(offCurrProg + 0x00, 1, "Number of Tones");
-      hdr->addChild(offCurrProg + 0x01, 1, "Volume");
-      hdr->addChild(offCurrProg + 0x02, 1, "Priority");
-      hdr->addChild(offCurrProg + 0x03, 1, "Mode");
-      hdr->addChild(offCurrProg + 0x04, 1, "Pan");
-      hdr->addChild(offCurrProg + 0x05, 1, "Reserved");
-      hdr->addChild(offCurrProg + 0x06, 2, "Attribute");
-      hdr->addChild(offCurrProg + 0x08, 4, "Reserved");
-      hdr->addChild(offCurrProg + 0x0c, 4, "Reserved");
+      VGMHeader *progHdr = progsHdr->addHeader(offCurrProg, 0x10, progName);
+      progHdr->addChild(offCurrProg + 0x00, 1, "Number of Tones");
+      progHdr->addChild(offCurrProg + 0x01, 1, "Volume");
+      progHdr->addChild(offCurrProg + 0x02, 1, "Priority");
+      progHdr->addChild(offCurrProg + 0x03, 1, "Mode");
+      progHdr->addChild(offCurrProg + 0x04, 1, "Pan");
+      progHdr->addChild(offCurrProg + 0x05, 1, "Reserved");
+      progHdr->addChild(offCurrProg + 0x06, 2, "Attribute");
+      progHdr->addChild(offCurrProg + 0x08, 4, "Reserved");
+      progHdr->addChild(offCurrProg + 0x0c, 4, "Reserved");
 
       newInstr->masterVol = readByte(offCurrProg + 0x01);
 
@@ -117,13 +117,13 @@ bool Vab::parseInstrPointers() {
 
   if ((offVAGOffsets + 2 * 256) <= nEndOffset) {
     char name[256];
-    u32 totalVAGSize = 0;
     VGMHeader *vagOffsetHdr = addHeader(offVAGOffsets, 2 * 256, "VAG Pointer Table");
 
     u32 vagStartOffset = offVAGOffsets + 2 * 256;
     u32 vagOffset = 0;
+    // VAG pointer entries store each compressed sample size divided by 8.
 
-    for (u32 i = 1; i < numVAGs + 1; i++) {
+    for (u32 i = 1; i <= numVAGs; i++) {
       u32 vagSize = readShort(offVAGOffsets + i * 2) * 8;
 
       snprintf(name, 256, "VAG Size /8 #%u", i);
@@ -132,7 +132,6 @@ bool Vab::parseInstrPointers() {
       auto absoluteVagOffset = vagStartOffset + vagOffset;
       if (absoluteVagOffset + vagSize <= nEndOffset) {
         m_vagLocations.emplace_back(vagOffset, vagSize);
-        totalVAGSize += vagSize;
       }
       else {
         L_WARN("VAG #{} pointer (offset=0x{:08X}, size={}) is invalid.", i, absoluteVagOffset, vagSize);
@@ -147,7 +146,7 @@ bool Vab::parseInstrPointers() {
 }
 
 bool Vab::isViableSampCollMatch(VGMSampColl* sampColl) {
-  int sampleIndex = 0;
+  size_t sampleIndex = 0;
   auto sampCollOffset = sampColl->offset();
   for (auto& vagLoc : m_vagLocations) {
     if (vagLoc.offset == 0 && vagLoc.size == 0)

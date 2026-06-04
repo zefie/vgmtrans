@@ -53,10 +53,8 @@ typedef struct _VAGHdr {
 
 // Sample Block
 typedef struct _VAGBlk {
-  struct {
-    u8 range : 4;
-    u8 filter : 4;
-  };
+  u8 range : 4;
+  u8 filter : 4;
 
   struct {
     b8 end : 1;      //End block
@@ -69,7 +67,7 @@ typedef struct _VAGBlk {
 
 
 //InitADSR is shamelessly ripped from P.E.Op.S
-static void initADSR()
+static inline void initADSR()
 {
   // build the rate table according to Neill's rules
   memset(RateTable, 0, sizeof(unsigned long) * 160);

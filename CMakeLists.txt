@@ -2,7 +2,7 @@
 # Licensed under the zlib license
 # Check the included LICENSE.txt for details
 
-cmake_minimum_required(VERSION 3.23)
+cmake_minimum_required(VERSION 3.25)
 
 project(
   VGMTrans
@@ -105,6 +105,8 @@ option(USE_SYSTEM_UNARR "Use system-provided unarr library" OFF)
 option(USE_SYSTEM_LIBCHDR "Use system-provided libchdr library" OFF)
 option(USE_SYSTEM_MINIZIP "Use system-provided minizip library" OFF)
 option(USE_SYSTEM_NEOBAE "Use system-provided NeoBAE library" OFF)
+
+include(VGMTransWarnings)
 
 # ~~~
 # Source

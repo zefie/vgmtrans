@@ -31,8 +31,8 @@ KonamiArcadeInstrSet::KonamiArcadeInstrSet(RawFile *file,
                                            u32 drumSampleTableOffset,
                                            KonamiArcadeFormatVer fmtVer)
     : VGMInstrSet(KonamiArcadeFormat::name, file, offset, 0, std::move(name)),
-      m_drumTableOffset(drumTableOffset), m_drumSampleTableOffset(drumSampleTableOffset),
-      m_fmtVer(fmtVer) {
+      m_fmtVer(fmtVer), m_drumTableOffset(drumTableOffset),
+      m_drumSampleTableOffset(drumSampleTableOffset) {
 }
 
 void KonamiArcadeInstrSet::addSampleInfoChildren(VGMItem* sampInfoItem, u32 off) {
@@ -112,10 +112,10 @@ bool KonamiArcadeInstrSet::parseInstrPointers() {
     "Drum Kit"
   );
   std::vector<VGMInstr *> aDrumKit;
-  for (int i = 0; i < sizeof(m_drums) / sizeof(drum); ++i) {
+  for (size_t i = 0; i < sizeof(m_drums) / sizeof(m_drums[0]); ++i) {
     drum& d = m_drums[i];
-    u32 off = m_drumTableOffset + i * sizeof(drum);
-    int sampNum = numMelodicInstrs + d.samp_num;
+    u32 off = m_drumTableOffset + static_cast<u32>(i * sizeof(drum));
+    int drumSampNum = numMelodicInstrs + d.samp_num;
 
     if (d.unity_key >= 0x60) {
       break;
@@ -126,7 +126,7 @@ bool KonamiArcadeInstrSet::parseInstrPointers() {
     rgn->keyLow = i + 24;
     rgn->keyHigh = i + 24;
     int unityKey = (i + 24) + (0x2A - d.unity_key);
-    rgn->sampNum = sampNum;
+    rgn->sampNum = drumSampNum;
     rgn->unityKey = unityKey;
     rgn->release_time = drumReleaseTime;
     rgn->setVolume(volTable[d.attenuation]);

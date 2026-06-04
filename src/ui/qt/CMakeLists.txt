@@ -1,3 +1,4 @@
+set(QT_NO_PRIVATE_MODULE_WARNING ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui ShaderTools Widgets Svg)
 # GuiPrivate was moved to a CMake component starting Qt 6.9,
 # so look for it separately to avoid breaking older versions
@@ -13,7 +14,8 @@ if(NOT TARGET QWindowKit::Widgets)
   set(QWINDOWKIT_INSTALL OFF CACHE BOOL "" FORCE)
   add_subdirectory(${PROJECT_SOURCE_DIR}/lib/qwindowkit
                    ${CMAKE_CURRENT_BINARY_DIR}/lib/qwindowkit
-                   EXCLUDE_FROM_ALL)
+                   EXCLUDE_FROM_ALL
+                   SYSTEM)
 endif()
 
 # D-Bus is used on Linux for the XDG FileTransfer portal
@@ -33,6 +35,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 
 add_executable(vgmtrans ${GUI_TYPE})
+vgmtrans_enable_project_warnings(vgmtrans)
 target_sources(vgmtrans
   PRIVATE
     About.cpp

@@ -26,7 +26,7 @@ bool PS1Seq::parseHeader() {
   nNumTracks = 16;
 
   u8 numer = readByte(offset() + 0x0D);
-  u8 denom = readByte(offset() + 0x0E);
+  // u8 denom = readByte(offset() + 0x0E);
   if (numer == 0 || numer > 32)                //sanity check
     return false;
 
@@ -109,9 +109,9 @@ bool PS1Seq::readEvent() {
       // EXCEPTIONAL CASE: Mega Man 8: 12. Ruins Stage.psf (Sword Man stage)
       // 3182D: 00 C0 00 00 00 00 00 00 00 00 00 00 C2 02
 
-      constexpr size_t kZeroDataLengthThreshold = 10;
+      constexpr u32 kZeroDataLengthThreshold = 10;
       bool no_next_data = true;
-      for (off_t off = beginOffset; off < beginOffset + kZeroDataLengthThreshold; off++) {
+      for (u32 off = beginOffset; off < beginOffset + kZeroDataLengthThreshold; off++) {
         if (readByte(off) != 0) {
           no_next_data = false;
           break;

@@ -18,6 +18,8 @@
 #include "VGMSamp.h"
 #include "VGMSampColl.h"
 
+#include <utility>
+
 namespace conversion {
 
 SF2File* createSF2File(const VGMColl& coll) {
@@ -129,9 +131,9 @@ SynthFile* createSynthFile(
           bool bFoundIt = false;
           for (u32 s = 0; s < sampColl->samples.size(); s++) {  //for every sample
             auto sample = sampColl->samples[s];
-            if (rgn->sampOffset == sample->offset() ||
-                rgn->sampOffset == sample->offset() - sampColl->offset() - sampColl->sampDataOffset) {
-              if (rgn->sampDataLength != -1 && rgn->sampDataLength != sample->dataLength) {
+            if (std::cmp_equal(rgn->sampOffset, sample->offset()) ||
+                std::cmp_equal(rgn->sampOffset, sample->offset() - sampColl->offset() - sampColl->sampDataOffset)) {
+              if (rgn->sampDataLength != -1 && !std::cmp_equal(rgn->sampDataLength, sample->dataLength)) {
                 continue;
               }
 

@@ -26,8 +26,8 @@ void SegSatSeq::resetVars() {
   VGMSeqNoTrks::resetVars();
 
   m_remainingNotesInLoop = 0;
-  m_loopEndPos = -1;
-  m_foreverLoopStart = -1;
+  m_loopEndPos = kInvalidOffset;
+  m_foreverLoopStart = kInvalidOffset;
   m_durationAccumulator = 0;
   memset(m_vol, 0x7F, 16);
   memset(m_progNum, 0, 16);
@@ -54,10 +54,7 @@ void SegSatSeq::useColl(const VGMColl* coll) {
   m_collContext.instrs.reserve(instrSet->aInstrs.size());
 
   for (VGMInstr* instr : instrSet->aInstrs) {
-    const SegSatInstr* pInstr = dynamic_cast<const SegSatInstr*>(instr);
-    SegSatInstr instrCopy = *pInstr;
-    instrCopy.removeChildren();
-    m_collContext.instrs.push_back(instrCopy);
+    m_collContext.instrs.push_back(dynamic_cast<const SegSatInstr*>(instr));
   }
 }
 
@@ -83,10 +80,14 @@ const SegSatRgn* SegSatSeq::resolveRegion(u8 bank, u8 progNum, u8 noteNum) {
   if (progNum >= instrs.size())
     return nullptr;
 
-  const auto& rgns = instrs[progNum].regions();
+  auto* instr = instrs[progNum];
+  if (instr == nullptr)
+    return nullptr;
+
+  const auto& rgns = instr->regions();
   for (const auto* rgn : rgns) {
     auto segSatRgn = dynamic_cast<const SegSatRgn*>(rgn);
-    if (noteNum >= segSatRgn->keyLow && noteNum <= segSatRgn->keyHigh) {
+    if (segSatRgn != nullptr && noteNum >= segSatRgn->keyLow && noteNum <= segSatRgn->keyHigh) {
       return segSatRgn;
     }
   }
@@ -126,10 +127,10 @@ u8 SegSatSeq::resolveVelocity(u8 vel, const SegSatRgn& rgn, s8 volBias, u8 ch) {
   // differences in future versions (and perhaps older versions too?)
   u8 shift = rate >> 4;
   bool boost = (rate >> 3) & 1;
-  u8 mode = rate & 7;
+  u8 rateMode = rate & 7;
   u8 newVel = base;
   u16 velMargin = vel - point;
-  switch (mode) {
+  switch (rateMode) {
     case 0: break;
     case 1:
       newVel += boost ? (((velMargin & 0x7F) * 12) << shift) >> 3 : (velMargin << shift);
@@ -204,8 +205,8 @@ bool SegSatSeq::readEvent() {
 
     u8 progNum = m_progNum[ch];
     auto* rgn = resolveRegion(0, m_progNum[ch], key);
-    if (rgn) {
-      s8 volBias = m_collContext.instrs[progNum].volBias();
+    if (rgn && progNum < m_collContext.instrs.size() && m_collContext.instrs[progNum] != nullptr) {
+      s8 volBias = m_collContext.instrs[progNum]->volBias();
       vel = resolveVelocity(vel, *rgn, volBias, ch);
     } else {
       L_WARN("Didn't find an instrument region with key range covering note event at offset: {:X}", beginOffset);
@@ -279,7 +280,7 @@ bool SegSatSeq::readEvent() {
     }
     else if ((status_byte & 0xF0) == 0xD0) {
       setChannel(status_byte & 0x0F);
-      u8 dataByte = readByte(curOffset++);
+      curOffset++;
       u16 deltaBit8 = 0; //(dataByte & 0x80) << 1;
       addTime(readByte(curOffset++) | deltaBit8);
       // TODO: add channel pressure events to SeqTrack and MidiFile
@@ -312,7 +313,7 @@ bool SegSatSeq::readEvent() {
         }
         case 0x82:
           addTime(readByte(curOffset++));
-          if (m_foreverLoopStart == -1) {
+          if (m_foreverLoopStart == kInvalidOffset) {
             m_foreverLoopStart = curOffset;
             addGenericEvent(beginOffset, curOffset - beginOffset,
               "Forever Loop Start Point", "", Type::RepeatStart);
