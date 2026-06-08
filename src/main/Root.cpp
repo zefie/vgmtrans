@@ -27,12 +27,17 @@
 #include <cassert>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <variant>
 
 #include <spdlog/fmt/std.h>
 
 VGMRoot *pRoot;
+
+VGMRoot::VGMRoot() = default;
+VGMRoot::~VGMRoot() = default;
 
 VGMFile* variantToVGMFile(VGMFileVariant variant) {
   VGMFile *vgmFilePtr = nullptr;
@@ -62,19 +67,17 @@ bool VGMRoot::init() {
 /* Opens up a file from the filesystem and scans it.
  * Returns bool indicating if VGMFiles were found. */
 bool VGMRoot::openRawFile(const std::filesystem::path &filePath) {
-  DiskFile* newFile = nullptr;
+  std::unique_ptr<DiskFile> newFile;
 
   try {
-    newFile = new DiskFile(filePath);
+    newFile = std::make_unique<DiskFile>(filePath);
   } catch (...) {
     L_ERROR("Failed to open file '{}': could not read from disk (file not found or permission denied)", filePath);
     UI_toast(fmt::format("Error opening file at path: {}", filePath), ToastType::Error);
     return false;
   }
   size_t vgmFileCountBefore = vgmFiles().size();
-  if (!loadRawFile(newFile)) {
-    delete newFile;
-  }
+  loadRawFile(std::move(newFile));
   return vgmFiles().size() > vgmFileCountBefore;
 }
 
@@ -83,65 +86,63 @@ bool VGMRoot::createVirtFile(const u8 *databuf, u32 fileSize, const std::string&
                              const std::filesystem::path &parRawFileFullPath, const VGMTag& tag) {
   assert(fileSize != 0);
 
-  auto newVirtFile = new VirtFile(databuf, fileSize, filename, parRawFileFullPath, tag);
-
-  if (!loadRawFile(newVirtFile)) {
-    delete newVirtFile;
-    return false;
-  }
-  return true;
+  return loadRawFile(std::make_unique<VirtFile>(databuf, fileSize, filename, parRawFileFullPath, tag));
 }
 
 // Applies loaders and scanners to a rawfile, loading any discovered files
 // returns true if files were discovered
-bool VGMRoot::loadRawFile(RawFile *newRawFile) {
+bool VGMRoot::loadRawFile(std::unique_ptr<RawFile> newRawFile) {
+  if (!newRawFile) {
+    return false;
+  }
+
+  RawFile* rawFile = newRawFile.get();
   pushLoadRawFile();
-  if (newRawFile->useLoaders()) {
+  if (rawFile->useLoaders()) {
     for (const auto &l : LoaderManager::get().loaders()) {
-      l->apply(newRawFile);
+      l->apply(rawFile);
       auto res = l->results();
 
       /* If the loader extracted anything, we shouldn't have to scan */
       if (!res.empty()) {
-        newRawFile->setUseScanners(false);
+        rawFile->setUseScanners(false);
 
-        for (const auto &file : res) {
-          if (!loadRawFile(file)) {
-            delete file;
-          }
+        for (auto& file : res) {
+          loadRawFile(std::move(file));
         }
       }
     }
   }
 
-  if (newRawFile->useScanners()) {
+  if (rawFile->useScanners()) {
     /*
      * Make use of the extension to run only a subset of scanners.
      * Unsure how good of an idea this is
      */
     auto specific_scanners =
-      ScannerManager::get().scannersWithExtension(newRawFile->extension());
+      ScannerManager::get().scannersWithExtension(rawFile->extension());
     if (!specific_scanners.empty()) {
       for (const auto &scanner : specific_scanners) {
-        scanner->scan(newRawFile);
-        if (auto matcher = scanner->format()->matcher) {
-          matcher->onFinishedScan(newRawFile);
+        scanner->scan(rawFile);
+        if (auto matcher = scanner->format()->matcher.get()) {
+          matcher->onFinishedScan(rawFile);
         }
       }
     } else {
       for (const auto &scanner : ScannerManager::get().scanners()) {
-        scanner->scan(newRawFile);
-        if (auto matcher = scanner->format()->matcher) {
-          matcher->onFinishedScan(newRawFile);
+        scanner->scan(rawFile);
+        if (auto matcher = scanner->format()->matcher.get()) {
+          matcher->onFinishedScan(rawFile);
         }
       }
     }
   }
 
-  bool foundFiles = !newRawFile->containedVGMFiles().empty();
+  bool foundFiles = !rawFile->containedVGMFiles().empty();
   if (foundFiles) {
-    m_rawfiles.emplace_back(newRawFile);
-    UI_loadRawFile(newRawFile);
+    m_rawfiles.emplace_back(rawFile);
+    UI_loadRawFile(rawFile);
+    m_ownedRawFiles.emplace_back(std::move(newRawFile));
   }
 
   popLoadRawFile();
@@ -158,9 +159,9 @@ bool VGMRoot::removeRawFile(RawFile *rawfile) {
     return false;
   }
 
-  auto &vgmfiles = rawfile->containedVGMFiles();
-  for (const auto & vgmfile : vgmfiles) {
-    removeVGMFile(*vgmfile, false);
+  auto vgmfiles = rawfile->containedVGMFiles();
+  for (const auto &vgmfile : vgmfiles) {
+    removeVGMFile(vgmfile, false);
   }
 
   pushRemoveRawFiles();
@@ -168,15 +169,49 @@ bool VGMRoot::removeRawFile(RawFile *rawfile) {
   m_rawfiles.erase(iter);
   popRemoveRawFiles();
 
-  delete rawfile;
+  auto ownedIter = std::ranges::find_if(m_ownedRawFiles, [rawfile](const auto& ownedRawFile) {
+    return ownedRawFile.get() == rawfile;
+  });
+  if (ownedIter != m_ownedRawFiles.end()) {
+    m_ownedRawFiles.erase(ownedIter);
+  } else {
+    L_WARN("RawFile removed from Root did not have an owning entry");
+  }
   return true;
 }
 
-void VGMRoot::addVGMFile(std::variant<VGMSeq *, VGMInstrSet *, VGMSampColl *, VGMMiscFile *> file) {
-  m_vgmfiles.push_back(file);
-  auto vgmFile = variantToVGMFile(file);
+bool VGMRoot::loadVGMFile(std::unique_ptr<VGMFile> file, bool useMatcher) {
+  if (!file || !file->load()) {
+    return false;
+  }
+
+  sinkVGMFile(std::move(file), useMatcher);
+  return true;
+}
+
+void VGMRoot::sinkVGMFile(std::unique_ptr<VGMFile>&& file, bool useMatcher) {
+  if (!file) {
+    return;
+  }
+
+  auto discoveredFiles = file->releaseDiscoveredFiles();
+  for (auto& discoveredFile : discoveredFiles) {
+    sinkVGMFile(std::move(discoveredFile), useMatcher);
+  }
+
+  auto* vgmFile = file.get();
+  auto variant = vgmFileToVariant(vgmFile);
+  vgmFile->rawFile()->addContainedVGMFile(variant);
+  m_ownedVGMFiles.emplace_back(std::move(file));
+  m_vgmfiles.push_back(variant);
   L_INFO("Loaded {} ({} bytes at {:x}) successfully.", vgmFile->name(), vgmFile->length(), vgmFile->offset());
-  UI_addVGMFile(file);
+  UI_addVGMFile(variant);
+
+  if (useMatcher) {
+    if (auto fmt = vgmFile->format(); fmt) {
+      fmt->onNewFile(variant);
+    }
+  }
 }
 
 // Removes a VGMFile from the interface.  The UI_RemoveVGMFile will handle the
@@ -200,8 +235,8 @@ void VGMRoot::removeVGMFile(std::variant<VGMSeq *, VGMInstrSet *, VGMSampColl *,
     L_WARN("Requested deletion for VGMFile but it was not found");
   }
 
-  while (!targFile->assocColls.empty()) {
-    removeVGMColl(targFile->assocColls.back());
+  while (targFile->hasAssocColls()) {
+    removeVGMColl(targFile->assocColls().back());
   }
 
   if (bRemoveEmptyRawFile) {
@@ -211,12 +246,35 @@ void VGMRoot::removeVGMFile(std::variant<VGMSeq *, VGMInstrSet *, VGMSampColl *,
       removeRawFile(rawFile);
     }
   }
-  delete targFile;
+
+  auto ownedIter = std::ranges::find_if(m_ownedVGMFiles, [targFile](const auto& ownedVGMFile) {
+    return ownedVGMFile.get() == targFile;
+  });
+  if (ownedIter != m_ownedVGMFiles.end()) {
+    m_ownedVGMFiles.erase(ownedIter);
+  } else {
+    L_WARN("VGMFile removed from Root did not have an owning entry");
+  }
 }
 
-void VGMRoot::addVGMColl(VGMColl *theColl) {
-  m_vgmcolls.push_back(theColl);
-  UI_addVGMColl(theColl);
+bool VGMRoot::loadVGMColl(std::unique_ptr<VGMColl> coll) {
+  if (!coll || !coll->load()) {
+    return false;
+  }
+
+  sinkVGMColl(std::move(coll));
+  return true;
+}
+
+void VGMRoot::sinkVGMColl(std::unique_ptr<VGMColl>&& coll) {
+  if (!coll) {
+    return;
+  }
+
+  auto* rawColl = coll.get();
+  m_vgmcolls.push_back(rawColl);
+  UI_addVGMColl(rawColl);
+  m_ownedVGMColls.emplace_back(std::move(coll));
 }
 
 void VGMRoot::removeVGMColl(VGMColl *coll) {
@@ -231,7 +289,15 @@ void VGMRoot::removeVGMColl(VGMColl *coll) {
   coll->removeFileAssocs();
   UI_removeVGMColl(coll);
   popRemoveVGMColls();
-  delete coll;
+
+  auto ownedIter = std::ranges::find_if(m_ownedVGMColls, [coll](const auto& ownedColl) {
+    return ownedColl.get() == coll;
+  });
+  if (ownedIter != m_ownedVGMColls.end()) {
+    m_ownedVGMColls.erase(ownedIter);
+  } else {
+    L_WARN("VGMColl removed from Root did not have an owning entry");
+  }
 }
 
 void VGMRoot::removeAllFilesAndCollections() {
@@ -239,7 +305,8 @@ void VGMRoot::removeAllFilesAndCollections() {
 
   for (auto vgmcoll : m_vgmcolls)
     UI_removeVGMColl(vgmcoll);
-  deleteVect(m_vgmcolls);
+  m_vgmcolls.clear();
+  m_ownedVGMColls.clear();
 
   for (auto variant : m_vgmfiles) {
     auto vgmfile = variantToVGMFile(variant);
@@ -247,13 +314,14 @@ void VGMRoot::removeAllFilesAndCollections() {
       fmt->onCloseFile(variant);
     }
     UI_removeVGMFile(vgmfile);
-    delete variantToVGMFile(variant);
   }
   m_vgmfiles.clear();
+  m_ownedVGMFiles.clear();
 
   for (auto rawfile: m_rawfiles)
     UI_removeRawFile(rawfile);
-  deleteVect(m_rawfiles);
+  m_rawfiles.clear();
+  m_ownedRawFiles.clear();
 
   popRemoveAll();
 }

@@ -2,6 +2,9 @@
 
 #include "AkaoInstr.h"
 #include "AkaoSeq.h"
+#include "Root.h"
+
+#include <ranges>
 
 bool isPsfFile(RawFile* file) {
   return file->extension() == "psf" ||
@@ -115,7 +118,7 @@ bool AkaoMatcher::tryCreateCollection(int id) {
     }
 
     std::vector<u32> requiredArtIds;
-    for (const auto &instr : instrSet->aInstrs) {
+    for (const auto &instr : instrSet->instrs()) {
       for (const auto &region : instr->regions()) {
         AkaoRgn* akaoRegion = static_cast<AkaoRgn*>(region);
         // We will exclude articulation id 0, as it often just indicates an unused region
@@ -157,8 +160,8 @@ bool AkaoMatcher::tryCreateCollection(int id) {
       if (!coll) return false;
 
       coll->setName(seq->name());
-      coll->useSeq(seq);
-      coll->addInstrSet(instrSet);
+      coll->attachSeq(seq);
+      coll->attachInstrSet(instrSet);
 
       // Sort the vector by starting_art_id in ascending order
       std::sort(matchingSampColls.begin(), matchingSampColls.end(),
@@ -166,13 +169,12 @@ bool AkaoMatcher::tryCreateCollection(int id) {
           return a->starting_art_id < b->starting_art_id;
       });
       for (auto *sc : matchingSampColls) {
-        coll->addSampColl(sc);
+        coll->attachSampColl(sc);
       }
 
       seqs.erase(seq->seq_id);
 
-      if (!coll->load()) {
-        delete coll;
+      if (!pRoot->loadVGMColl(std::move(coll))) {
         return false;
       }
 

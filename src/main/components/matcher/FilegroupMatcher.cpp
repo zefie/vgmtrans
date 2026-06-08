@@ -7,11 +7,13 @@
 #include "FilegroupMatcher.h"
 
 #include "Format.h"
+#include "Root.h"
 #include "VGMColl.h"
 #include "VGMInstrSet.h"
 #include "VGMSampColl.h"
 #include "VGMSeq.h"
 
+#include <memory>
 #include <regex>
 
 FilegroupMatcher::FilegroupMatcher(Format *format) : Matcher(format) {}
@@ -93,7 +95,7 @@ void FilegroupMatcher::lookForMatch() {
   for (VGMInstrSet* instr : instrsets) {
     VGMSampColl* extraSamp = nullptr;
 
-    if (instr->sampColl == nullptr) {
+    if (instr->sampColl() == nullptr) {
       if (forcePairSingle) {                     // exactly one‑and‑one: pair regardless
         extraSamp = sampcolls.front();
         sampcolls.clear();
@@ -115,7 +117,7 @@ void FilegroupMatcher::lookForMatch() {
         }
       }
     } else {
-      extraSamp = instr->sampColl;                // use the existing sample collection
+      extraSamp = instr->sampColl();                // use the existing sample collection
     }
 
     // keep only instrsets that actually have a sample collection to work with
@@ -133,16 +135,16 @@ void FilegroupMatcher::lookForMatch() {
   for (VGMSeq* seq : seqs) {
     const InstrAssoc& assoc = *assocIt;
 
-    VGMColl* coll = fmt->newCollection();
+    auto coll = fmt->newCollection();
     coll->setName(seq->name());
-    coll->useSeq(seq);
-    coll->addInstrSet(assoc.instrSet);
-    if (assoc.sampColl && assoc.instrSet->sampColl == nullptr) {
-      coll->addSampColl(assoc.sampColl);
+    coll->attachSeq(seq);
+    coll->attachInstrSet(assoc.instrSet);
+    if (assoc.sampColl && assoc.instrSet->sampColl() == nullptr) {
+      coll->attachSampColl(assoc.sampColl);
     }
 
-    if (!coll->load()) {
-      delete coll;
+    if (!pRoot->loadVGMColl(std::move(coll))) {
+      return;
     }
 
     // advance through the association list; keep using the last one once we run out

@@ -15,14 +15,11 @@ FormatMap &Format::registry() {
   return registry;
 }
 
-Format::Format(const std::string &formatName) : matcher(nullptr), scanner(nullptr) {
+Format::Format(const std::string &formatName) {
   registry().insert(make_pair(formatName, this));
 }
 
-Format::~Format() {
-  delete scanner;
-  delete matcher;
-}
+Format::~Format() = default;
 
 Format *Format::formatFromName(const std::string &name) {
   auto findIt = registry().find(name);
@@ -38,8 +35,12 @@ bool Format::onNewFile(std::variant<VGMSeq *, VGMInstrSet *, VGMSampColl *, VGMM
   return matcher->onNewFile(file);
 }
 
-VGMColl *Format::newCollection() {
-  return new VGMColl();
+std::unique_ptr<VGMColl> Format::newCollection() {
+  return std::make_unique<VGMColl>();
+}
+
+std::unique_ptr<Matcher> Format::newMatcher() {
+  return nullptr;
 }
 
 bool Format::onCloseFile(std::variant<VGMSeq *, VGMInstrSet *, VGMSampColl *, VGMMiscFile *> file) {

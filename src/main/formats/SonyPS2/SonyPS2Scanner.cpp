@@ -9,6 +9,8 @@
 #include "SonyPS2InstrSet.h"
 #include "SonyPS2Seq.h"
 
+#include <vector>
+
 namespace vgmtrans::scanners {
 ScannerRegistration<SonyPS2Scanner> s_sonyps2("SonyPS2", {"sq", "hd", "bd"});
 }
@@ -39,9 +41,7 @@ void SonyPS2Scanner::searchForSeq(RawFile *file) {
     if (sig1 != 0x53434549 || sig2 != 0x4D696469)  // "SCEIMidi" in ASCII
       continue;
 
-    SonyPS2Seq *newSeq = new SonyPS2Seq(file, i, "Sony PS2 Seq");
-    if (!newSeq->loadVGMFile())
-      delete newSeq;
+    pRoot->loadVGMFile<SonyPS2Seq>(file, i, "Sony PS2 Seq");
   }
 }
 
@@ -63,9 +63,7 @@ void SonyPS2Scanner::searchForInstrSet(RawFile *file) {
     if (sig1 != 0x53434549 || sig2 != 0x56616769)  // "SCEIVagi" in ASCII
       continue;
 
-    SonyPS2InstrSet *newInstrSet = new SonyPS2InstrSet(file, i);
-    if (!newInstrSet->loadVGMFile())
-      delete newInstrSet;
+    pRoot->loadVGMFile<SonyPS2InstrSet>(file, i);
   }
 }
 
@@ -81,19 +79,12 @@ void SonyPS2Scanner::searchForSampColl(RawFile *file) {
     int num = std::count(file->begin(), file->begin() + 16, 0);
     if (num != 16) {
       u32 newFileSize = file->size() + 16;
-      u8 *newdataBuf = new u8[newFileSize];
-      file->readBytes(0, file->size(), newdataBuf + 16);
-      memset(newdataBuf, 0, 16);
-      pRoot->createVirtFile(newdataBuf, newFileSize, file->name(), file->path());
+      std::vector<u8> newdataBuf(newFileSize);
+      file->readBytes(0, file->size(), newdataBuf.data() + 16);
+      pRoot->createVirtFile(newdataBuf.data(), newFileSize, file->name(), file->path());
       return;
     }
 
-    SonyPS2SampColl *sampColl = new SonyPS2SampColl(file, 0);
-    Format *fmt = sampColl->format();
-    if (fmt) {
-      fmt->onNewFile(sampColl);
-      file->addContainedVGMFile(
-        std::make_shared<std::variant<VGMSeq *, VGMInstrSet *, VGMSampColl *, VGMMiscFile *>>(sampColl));
-    }
+    pRoot->loadPendingVGMFile<SonyPS2SampColl>(file, 0);
   }
 }

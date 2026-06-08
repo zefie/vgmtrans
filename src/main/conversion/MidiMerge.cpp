@@ -51,19 +51,19 @@ u64 rescaleTick(u32 tick, u16 srcPPQN, u16 dstPPQN) {
 u32 getMidiDurationTicks(const MidiFile& midi) {
   u32 maxTick = 0;
 
-  for (const MidiTrack* track : midi.aTracks) {
+  for (const MidiTrack* track : midi.tracks()) {
     if (!track) {
       continue;
     }
 
-    for (const MidiEvent* event : track->aEvents) {
+    for (const MidiEvent* event : track->events()) {
       if (event) {
         maxTick = std::max(maxTick, event->absTime);
       }
     }
   }
 
-  for (const MidiEvent* event : midi.globalTrack.aEvents) {
+  for (const MidiEvent* event : midi.globalTrack.events()) {
     if (event) {
       maxTick = std::max(maxTick, event->absTime);
     }
@@ -77,7 +77,7 @@ void retimeTrack(MidiTrack* track, u16 srcPPQN, u16 dstPPQN, u32 startTick) {
     return;
   }
 
-  for (MidiEvent* event : track->aEvents) {
+  for (MidiEvent* event : track->events()) {
     if (!event) {
       continue;
     }
@@ -135,7 +135,7 @@ bool applyBankOffsetToTrack(MidiTrack* track,
     return true;
   };
 
-  for (MidiEvent* event : track->aEvents) {
+  for (MidiEvent* event : track->events()) {
     if (!event) {
       continue;
     }
@@ -161,7 +161,7 @@ bool applyBankOffsetToTrack(MidiTrack* track,
     }
   }
 
-  std::vector<MidiEvent*> injectedBankEvents;
+  std::vector<std::unique_ptr<MidiEvent>> injectedBankEvents;
   injectedBankEvents.reserve(32);
   u8 remappedBankMsb = 0;
   u8 remappedBankLsb = 0;
@@ -174,12 +174,12 @@ bool applyBankOffsetToTrack(MidiTrack* track,
     if (!usedChannels[channel]) {
       continue;
     }
-    injectedBankEvents.push_back(new BankSelectEvent(track, channel, startTick, remappedBankMsb));
-    injectedBankEvents.push_back(new BankSelectFineEvent(track, channel, startTick, remappedBankLsb));
+    injectedBankEvents.push_back(std::make_unique<BankSelectEvent>(track, channel, startTick, remappedBankMsb));
+    injectedBankEvents.push_back(std::make_unique<BankSelectFineEvent>(track, channel, startTick, remappedBankLsb));
   }
 
   // Keep injected bank selects ahead of same-tick program changes when priorities are equal
-  track->aEvents.insert(track->aEvents.begin(), injectedBankEvents.begin(), injectedBankEvents.end());
+  track->prependEvents(std::move(injectedBankEvents));
 
   return true;
 }
@@ -342,7 +342,7 @@ std::unique_ptr<MidiFile> mergeMidiSequences(const std::vector<MidiMergeEntry>& 
       return nullptr;
     }
 
-    std::unique_ptr<MidiFile> midi(seq->convertToMidi(coll, context));
+    auto midi = seq->convertToMidi(coll, context);
     if (!midi) {
       L_ERROR("Failed to convert one of the source sequences to MIDI.");
       return nullptr;
@@ -407,32 +407,31 @@ std::unique_ptr<MidiFile> mergeMidiSequences(const std::vector<MidiMergeEntry>& 
     const u8 bankOffset = options.bankOffsets.empty() ? 0 : options.bankOffsets[i];
 
     retimeTrack(&source->globalTrack, sourcePPQN, targetPPQN, startTick);
-    for (MidiEvent* event : source->globalTrack.aEvents) {
+    auto globalEvents = source->globalTrack.releaseEvents();
+    for (auto& event : globalEvents) {
       if (!event) {
         continue;
       }
 
       event->prntTrk = &mergedMidi->globalTrack;
-      mergedMidi->globalTrack.aEvents.push_back(event);
+      mergedMidi->globalTrack.sinkEvent(std::move(event));
     }
-    source->globalTrack.aEvents.clear();
 
-    for (MidiTrack*& track : source->aTracks) {
+    auto tracks = source->releaseTracks();
+    for (auto& track : tracks) {
       if (!track) {
         continue;
       }
 
-      retimeTrack(track, sourcePPQN, targetPPQN, startTick);
+      retimeTrack(track.get(), sourcePPQN, targetPPQN, startTick);
       if (!options.bankOffsets.empty() &&
-          !applyBankOffsetToTrack(track, bankOffset, startTick, context)) {
+          !applyBankOffsetToTrack(track.get(), bankOffset, startTick, context)) {
         return nullptr;
       }
 
       track->parentSeq = mergedMidi.get();
-      mergedMidi->aTracks.push_back(track);
-      track = nullptr;
+      mergedMidi->sinkTrack(std::move(track));
     }
-    source->aTracks.clear();
   }
 
   if (result) {
@@ -482,14 +481,17 @@ bool saveMergedSoundfont(const std::vector<MidiMergeEntry>& entries,
     }
 
     ExportPrepGuard guard(instrsets, coll);
-    std::unique_ptr<SynthFile> partSynth(createSynthFile(instrsets, sampcolls));
+    auto partSynth = createSynthFile(instrsets, sampcolls);
     if (!partSynth) {
       L_ERROR("Failed to build a temporary SynthFile for one stitched chunk.");
       return false;
     }
 
     const u8 bankOffset = bankOffsets[i];
-    for (SynthInstr* instr : partSynth->vInstrs) {
+    auto partInstrs = partSynth->releaseInstrs();
+    auto partWaves = partSynth->releaseWaves();
+
+    for (const auto& instr : partInstrs) {
       if (!instr) {
         continue;
       }
@@ -501,29 +503,27 @@ bool saveMergedSoundfont(const std::vector<MidiMergeEntry>& entries,
       instr->ulBank = remapped;
     }
 
-    const u32 waveOffset = static_cast<u32>(mergedSynth->vWaves.size());
+    const u32 waveOffset = static_cast<u32>(mergedSynth->waveCount());
 
-    for (SynthInstr* instr : partSynth->vInstrs) {
+    for (auto& instr : partInstrs) {
       if (!instr) {
         continue;
       }
-      for (SynthRgn* rgn : instr->vRgns) {
+      for (SynthRgn* rgn : instr->regions()) {
         if (rgn) {
           rgn->tableIndex += waveOffset;
         }
       }
-      mergedSynth->vInstrs.push_back(instr);
+      mergedSynth->sinkInstr(std::move(instr));
     }
-    for (SynthWave* wave : partSynth->vWaves) {
+    for (auto& wave : partWaves) {
       if (wave) {
-        mergedSynth->vWaves.push_back(wave);
+        mergedSynth->sinkWave(std::move(wave));
       }
     }
-    partSynth->vInstrs.clear();
-    partSynth->vWaves.clear();
   }
 
-  if (mergedSynth->vInstrs.empty() || mergedSynth->vWaves.empty()) {
+  if (!mergedSynth->hasInstrs() || !mergedSynth->hasWaves()) {
     L_ERROR("Merged SF2 has no instruments or no samples.");
     return false;
   }

@@ -97,9 +97,8 @@ void NinSnesScanner::scan(RawFile* file, void* info) {
 }
 
 void NinSnesScanner::loadFromScanResult(RawFile* file, const NinSnesScanResult& scanResult) {
-  auto* newSeq = new NinSnesSeq(file, scanResult);
-  if (!newSeq->loadVGMFile()) {
-    delete newSeq;
+  auto* newSeq = pRoot->loadVGMFile<NinSnesSeq>(file, scanResult);
+  if (!newSeq) {
     return;
   }
 
@@ -108,9 +107,8 @@ void NinSnesScanner::loadFromScanResult(RawFile* file, const NinSnesScanResult& 
     return;
   }
 
-  auto* newInstrSet = new NinSnesInstrSet(file, scanResult);
-  if (!newInstrSet->loadVGMFile()) {
-    delete newInstrSet;
+  auto* newInstrSet = pRoot->loadVGMFile<NinSnesInstrSet>(file, scanResult);
+  if (!newInstrSet) {
     return;
   }
 }

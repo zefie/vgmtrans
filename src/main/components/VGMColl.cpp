@@ -43,7 +43,7 @@ VGMSeq *VGMColl::seq() const {
   return m_seq;
 }
 
-void VGMColl::useSeq(VGMSeq *theSeq) {
+void VGMColl::attachSeq(VGMSeq *theSeq) {
   if (theSeq != nullptr)
     theSeq->addCollAssoc(this);
   if (m_seq && (theSeq != m_seq))  // if we associated with a previous sequence
@@ -51,21 +51,21 @@ void VGMColl::useSeq(VGMSeq *theSeq) {
   m_seq = theSeq;
 }
 
-void VGMColl::addInstrSet(VGMInstrSet *theInstrSet) {
+void VGMColl::attachInstrSet(VGMInstrSet *theInstrSet) {
   if (theInstrSet != nullptr) {
     theInstrSet->addCollAssoc(this);
     m_instrsets.push_back(theInstrSet);
   }
 }
 
-void VGMColl::addSampColl(VGMSampColl *theSampColl) {
+void VGMColl::attachSampColl(VGMSampColl *theSampColl) {
   if (theSampColl != nullptr) {
     theSampColl->addCollAssoc(this);
     m_sampcolls.push_back(theSampColl);
   }
 }
 
-void VGMColl::addMiscFile(VGMMiscFile *theMiscFile) {
+void VGMColl::attachMiscFile(VGMMiscFile *theMiscFile) {
   if (theMiscFile != nullptr) {
     theMiscFile->addCollAssoc(this);
     m_miscfiles.push_back(theMiscFile);
@@ -73,10 +73,7 @@ void VGMColl::addMiscFile(VGMMiscFile *theMiscFile) {
 }
 
 bool VGMColl::load() {
-  if (!loadMain())
-    return false;
-  pRoot->addVGMColl(this);
-  return true;
+  return loadMain();
 }
 
 // A helper lambda function to search for a file in a vector of VGMFile*

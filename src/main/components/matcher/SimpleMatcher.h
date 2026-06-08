@@ -8,12 +8,14 @@
 
 #include "Format.h"
 #include "Matcher.h"
+#include "Root.h"
 #include "VGMColl.h"
 #include "VGMInstrSet.h"
 #include "VGMSampColl.h"
 #include "VGMSeq.h"
 
 #include <map>
+#include <memory>
 #include <utility>
 
 // *************
@@ -46,27 +48,25 @@ protected:
     if (VGMInstrSet *matchingInstrSet = instrsets[id]) {
       if (bRequiresSampColl) {
         if (VGMSampColl *matchingSampColl = sampcolls[id]) {
-          VGMColl *coll = fmt->newCollection();
+          auto coll = fmt->newCollection();
           if (!coll)
             return false;
           coll->setName(seq->name());
-          coll->useSeq(seq);
-          coll->addInstrSet(matchingInstrSet);
-          coll->addSampColl(matchingSampColl);
-          if (!coll->load()) {
-            delete coll;
+          coll->attachSeq(seq);
+          coll->attachInstrSet(matchingInstrSet);
+          coll->attachSampColl(matchingSampColl);
+          if (!pRoot->loadVGMColl(std::move(coll))) {
             return false;
           }
         }
       } else {
-        VGMColl *coll = fmt->newCollection();
+        auto coll = fmt->newCollection();
         if (!coll)
           return false;
         coll->setName(seq->name());
-        coll->useSeq(seq);
-        coll->addInstrSet(matchingInstrSet);
-        if (!coll->load()) {
-          delete coll;
+        coll->attachSeq(seq);
+        coll->attachInstrSet(matchingInstrSet);
+        if (!pRoot->loadVGMColl(std::move(coll))) {
           return false;
         }
       }
@@ -88,7 +88,7 @@ protected:
     if (bRequiresSampColl) {
       matchingSampColl = sampcolls[id];
       if (matchingSampColl && matchingSampColl->shouldLoadOnInstrSetMatch()) {
-        matchingSampColl->useInstrSet(instrset);
+        matchingSampColl->attachInstrSet(instrset);
         if (!matchingSampColl->load()) {
           onCloseSampColl(matchingSampColl);
           return false;
@@ -108,24 +108,24 @@ protected:
 
       if (bRequiresSampColl) {
         if (matchingSampColl) {
-          VGMColl *coll = fmt->newCollection();
+          auto coll = fmt->newCollection();
           if (!coll)
             return false;
           coll->setName(matchingSeq->name());
-          coll->useSeq(matchingSeq);
-          coll->addInstrSet(instrset);
-          coll->addSampColl(matchingSampColl);
-          coll->load();
+          coll->attachSeq(matchingSeq);
+          coll->attachInstrSet(instrset);
+          coll->attachSampColl(matchingSampColl);
+          if (!pRoot->loadVGMColl(std::move(coll)))
+            return false;
         }
       } else {
-        VGMColl *coll = fmt->newCollection();
+        auto coll = fmt->newCollection();
         if (!coll)
           return false;
         coll->setName(matchingSeq->name());
-        coll->useSeq(matchingSeq);
-        coll->addInstrSet(instrset);
-        if (!coll->load()) {
-          delete coll;
+        coll->attachSeq(matchingSeq);
+        coll->attachInstrSet(instrset);
+        if (!pRoot->loadVGMColl(std::move(coll))) {
           return false;
         }
       }
@@ -147,7 +147,7 @@ protected:
 
       if (matchingInstrSet) {
         if (sampcoll->shouldLoadOnInstrSetMatch()) {
-          sampcoll->useInstrSet(matchingInstrSet);
+          sampcoll->attachInstrSet(matchingInstrSet);
           if (!sampcoll->load()) {
             onCloseSampColl(sampcoll);
             return false;
@@ -166,15 +166,14 @@ protected:
         VGMSeq *matchingSeq = (*it2).second;
 
         if (matchingSeq && matchingInstrSet) {
-          VGMColl *coll = fmt->newCollection();
+          auto coll = fmt->newCollection();
           if (!coll)
             return false;
           coll->setName(matchingSeq->name());
-          coll->useSeq(matchingSeq);
-          coll->addInstrSet(matchingInstrSet);
-          coll->addSampColl(sampcoll);
-          if (!coll->load()) {
-            delete coll;
+          coll->attachSeq(matchingSeq);
+          coll->attachInstrSet(matchingInstrSet);
+          coll->attachSampColl(sampcoll);
+          if (!pRoot->loadVGMColl(std::move(coll))) {
             return false;
           }
         }

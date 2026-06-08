@@ -22,16 +22,16 @@
 
 namespace conversion {
 
-SF2File* createSF2File(const VGMColl& coll) {
+std::unique_ptr<SF2File> createSF2File(const VGMColl& coll) {
   const auto context = ConversionContext::fromOptions(ConversionOptions::the(), SynthTarget::SoundFont);
   return createSF2File(coll, context);
 }
 
-SF2File* createSF2File(const VGMColl& coll, const ConversionContext& context) {
+std::unique_ptr<SF2File> createSF2File(const VGMColl& coll, const ConversionContext& context) {
   return createSF2File(coll.instrSets(), coll.sampColls(), &coll, context);
 }
 
-SF2File* createSF2File(
+std::unique_ptr<SF2File> createSF2File(
   const std::vector<VGMInstrSet*>& instrsets,
   const std::vector<VGMSampColl*>& sampcolls,
   const VGMColl* coll,
@@ -41,7 +41,7 @@ SF2File* createSF2File(
     instrset->prepareForExport(coll);
   }
 
-  SynthFile *synthfile = createSynthFile(instrsets, sampcolls);
+  auto synthfile = createSynthFile(instrsets, sampcolls);
 
   for (auto* instrset : instrsets) {
     instrset->cleanupAfterExport();
@@ -50,12 +50,10 @@ SF2File* createSF2File(
     L_ERROR("SF2 conversion failed");
     return nullptr;
   }
-  SF2File *sf2file = new SF2File(synthfile, context);
-  delete synthfile;
-  return sf2file;
+  return std::make_unique<SF2File>(synthfile.get(), context);
 }
 
-SynthFile* createSynthFile(
+std::unique_ptr<SynthFile> createSynthFile(
   const std::vector<VGMInstrSet*>& m_instrsets,
   const std::vector<VGMSampColl*>& m_sampcolls
 ) {
@@ -64,8 +62,7 @@ SynthFile* createSynthFile(
     return nullptr;
   }
 
-  /* FIXME: shared_ptr eventually */
-  SynthFile *synthfile = new SynthFile("SynthFile");
+  auto synthfile = std::make_unique<SynthFile>("SynthFile");
 
   std::vector<VGMSamp *> finalSamps;
   std::vector<const VGMSampColl *> finalSampColls;
@@ -78,7 +75,7 @@ SynthFile* createSynthFile(
     }
   } else {
     for (auto & instrset : m_instrsets) {
-      if (auto instrset_sampcoll = instrset->sampColl) {
+      if (auto instrset_sampcoll = instrset->sampColl()) {
         finalSampColls.push_back(instrset_sampcoll);
         unpackSampColl(*synthfile, instrset_sampcoll, finalSamps);
       }
@@ -87,7 +84,6 @@ SynthFile* createSynthFile(
 
   if (finalSamps.empty()) {
     L_ERROR("No sample collection available to create a SynthFile.");
-    delete synthfile;
     return nullptr;
   }
 
@@ -109,15 +105,15 @@ SynthFile* createSynthFile(
       }
       for (u32 j = 0; j < nRgns; j++) {
         VGMRgn* rgn = vgminstr->regions()[j];
-        //				if (rgn->sampNum+1 > sampColl->samples.size())	//does thereferenced sample exist?
+        //				if (rgn->sampNum+1 > sampColl->sampleCount())	//does thereferenced sample exist?
         //					continue;
 
         // Determine the SampColl associated with this rgn.  If there's an explicit pointer to it, use that.
         const VGMSampColl* sampColl = rgn->sampCollPtr;
         if (!sampColl) {
           // If rgn is of an InstrSet with an embedded SampColl, use that SampColl.
-          if (static_cast<VGMInstrSet*>(rgn->vgmFile())->sampColl)
-            sampColl = static_cast<VGMInstrSet*>(rgn->vgmFile())->sampColl;
+          if (static_cast<VGMInstrSet*>(rgn->vgmFile())->sampColl())
+            sampColl = static_cast<VGMInstrSet*>(rgn->vgmFile())->sampColl();
           // If that does not exist, assume the first SampColl
           else
             sampColl = finalSampColls[0];
@@ -129,8 +125,8 @@ SynthFile* createSynthFile(
         // see sampOffset declaration in header file for more info.
         if (rgn->sampOffset != -1) {
           bool bFoundIt = false;
-          for (u32 s = 0; s < sampColl->samples.size(); s++) {  //for every sample
-            auto sample = sampColl->samples[s];
+          for (u32 s = 0; s < sampColl->sampleCount(); s++) {  //for every sample
+            auto sample = sampColl->sample(s);
             if (std::cmp_equal(rgn->sampOffset, sample->offset()) ||
                 std::cmp_equal(rgn->sampOffset, sample->offset() - sampColl->offset() - sampColl->sampDataOffset)) {
               if (rgn->sampDataLength != -1 && !std::cmp_equal(rgn->sampDataLength, sample->dataLength)) {
@@ -139,8 +135,6 @@ SynthFile* createSynthFile(
 
               realSampNum = s;
 
-              //samples[m]->loop.loopStart = parInstrSet->aInstrs[i]->aRgns[k]->loop.loopStart;
-              //samples[m]->loop.loopLength = (samples[m]->dataLength) - (parInstrSet->aInstrs[i]->aRgns[k]->loop.loopStart); //[aInstrs[i]->aRegions[k]->sample_num]->dwUncompSize/2) - ((aInstrs[i]->aRegions[k]->loop_point*28)/16); //to end of sample
               bFoundIt = true;
               break;
             }
@@ -169,7 +163,7 @@ SynthFile* createSynthFile(
         // now we add the number of samples from the preceding SampColls to the value to
         // get the real sampNum in the final DLS file.
         for (u32 k = 0; k < sampCollNum; k++)
-          realSampNum += finalSampColls[k]->samples.size();
+          realSampNum += finalSampColls[k]->sampleCount();
 
         if (realSampNum >= finalSamps.size()) {
           L_ERROR("Region has an explicit sample number that exceeds sample count. Sample Num: {:d} (Instrset "
@@ -191,7 +185,7 @@ SynthFile* createSynthFile(
           realSampNum = finalSamps.size() - 1;
         }
 
-        VGMSamp* samp = finalSamps[realSampNum];  // sampColl->samples[rgn->sampNum];
+        VGMSamp* samp = finalSamps[realSampNum];  // sampColl->sample(rgn->sampNum);
         SynthSampInfo* sampInfo = newRgn->addSampInfo();
 
         // This is a really loopy way of determining the loop information, pardon the pun.  However, it works.
@@ -208,7 +202,6 @@ SynthFile* createSynthFile(
               sampInfo->setLoopInfo(rgn->loop, samp);
             }
           } else {
-            delete synthfile;
             throw;
           }
         }
@@ -218,7 +211,6 @@ SynthFile* createSynthFile(
           if (samp->loop.loopStatus != -1)
             sampInfo->setLoopInfo(samp->loop, samp);
           else {
-            delete synthfile;
             throw;
           }
         } else
@@ -257,9 +249,9 @@ SynthFile* createSynthFile(
 void unpackSampColl(SynthFile &synthfile, const VGMSampColl *sampColl, std::vector<VGMSamp *> &finalSamps) {
   assert(sampColl != nullptr);
 
-  size_t nSamples = sampColl->samples.size();
+  size_t nSamples = sampColl->sampleCount();
   for (size_t i = 0; i < nSamples; i++) {
-    VGMSamp *samp = sampColl->samples[i];
+    VGMSamp *samp = sampColl->sample(i);
 
     std::vector<u8> uncompSampBuf = samp->toPcm(Signedness::Signed, Endianness::Little, BPS::PCM16);
 

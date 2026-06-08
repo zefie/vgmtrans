@@ -3,9 +3,9 @@
 #include "base/Types.h"
 
 #include <algorithm>
-#include <iterator>
-#include <ranges>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 template <class T>
@@ -87,6 +87,10 @@ public:
           u32 length = 0,
           std::string name = "",
           Type type = Type::Unknown);
+  VGMItem(const VGMItem& other) = delete;
+  VGMItem(VGMItem&& other) noexcept;
+  VGMItem& operator=(const VGMItem& other) = delete;
+  VGMItem& operator=(VGMItem&& other) noexcept = delete;
   virtual ~VGMItem();
 
   friend bool operator>(VGMItem &item1, VGMItem &item2);
@@ -108,29 +112,25 @@ public:
   virtual std::string description() { return ""; }
   virtual void addToUI(VGMItem *parent, void *UI_specific);
 
-  const std::vector<VGMItem*>& children() { return m_children; }
+  [[nodiscard]] const std::vector<VGMItem*>& children() const { return m_children; }
   [[nodiscard]] u32 offset() const noexcept { return m_offset; }
   [[nodiscard]] u32 length() const noexcept { return m_length; }
   void setOffset(u32 offset);
   void setLength(u32 length);
   void setRange(u32 offset, u32 length);
-  VGMItem* addChild(VGMItem* child);
+  VGMItem* sinkChild(std::unique_ptr<VGMItem>&& child);
+  template <class ChildType, class... Args>
+  ChildType* addChild(Args&&... args) {
+    auto child = std::make_unique<ChildType>(std::forward<Args>(args)...);
+    auto* rawChild = child.get();
+    sinkChild(std::move(child));
+    return rawChild;
+  }
   VGMItem* addChild(u32 offset, u32 length, const std::string &name);
   VGMItem* addUnknownChild(u32 offset, u32 length);
   VGMHeader* addHeader(u32 offset, u32 length, const std::string &name = "Header");
   void removeChildren();
   void transferChildren(VGMItem* destination);
-
-  template <std::ranges::input_range Range>
-  requires std::convertible_to<std::ranges::range_value_t<Range>, VGMItem*>
-  void addChildren(const Range& items) {
-    std::ranges::copy(items, std::back_inserter(m_children));
-    for (auto *child : m_children) {
-      child->m_parent = this;
-    }
-    m_childrenSorted = false;
-    m_childrenPrefixMaxEnd.clear();
-  }
 
   void sortChildrenByOffset();
 
@@ -148,6 +148,7 @@ public:
   const Type type;
 
 private:
+  std::vector<std::unique_ptr<VGMItem>> m_ownedChildren;
   std::vector<VGMItem *> m_children;
   // Maintains sort + prefix-max end cache for fast offset lookups.
   bool m_childrenSorted = true;
