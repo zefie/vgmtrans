@@ -6,6 +6,8 @@
 
 #include <chrono>
 #include <array>
+#include <algorithm>
+#include <cctype>
 #include <memory>
 #include <string>
 #include <set>
@@ -207,13 +209,13 @@ using SourceInstrumentRef = std::pair<uint16_t, uint8_t>;
 using AuthoredInstrumentKey = std::pair<uint8_t, uint8_t>;
 
 static constexpr uint16_t kEmbeddedTargetBanks[3] = {
-    static_cast<uint16_t>(0u << 7),
-    static_cast<uint16_t>(1u << 7),
-    static_cast<uint16_t>(2u << 7),
+    static_cast<uint16_t>(0u),
+    static_cast<uint16_t>(1u),
+    static_cast<uint16_t>(2u),
 };
 
 static constexpr SourceInstrumentRef kSilentPercussionFallbackTarget = {
-  static_cast<uint16_t>(2u << 7),
+  static_cast<uint16_t>(2u),
   static_cast<uint8_t>(127),
 };
 
@@ -235,7 +237,7 @@ static uint16_t targetInstrumentSlot(const SourceInstrumentRef &target) {
 }
 
 static uint32_t targetInstrumentInstID(const SourceInstrumentRef &target) {
-  return static_cast<uint32_t>(target.first) * 2u + static_cast<uint32_t>(target.second);
+  return static_cast<uint32_t>(target.first) * 256u + static_cast<uint32_t>(target.second);
 }
 
 static uint16_t convertCollectionBankToDocumentBank(uint16_t source_bank);
@@ -1248,7 +1250,9 @@ static bool isPercussionDocumentBank(uint16_t bank) {
   return normalized_bank == static_cast<uint8_t>(127) || normalized_bank == static_cast<uint8_t>(128);
 }
 
-static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMColl &coll) {
+static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
+                                      const VGMColl &coll,
+                                      bool prefer_zmf_assets) {
   auto count_collection_instruments = [&coll]() {
     size_t count = 0;
     for (const auto *set : coll.instrSets()) {
@@ -1870,12 +1874,17 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
       }
     }
 
-    if (!strict_authored_mode) {
-      const auto unique_authored_it = unique_authored_by_program.find(program);
-      if (unique_authored_it != unique_authored_by_program.end()) {
-        out_authored_key = unique_authored_it->second;
-        return true;
+    const auto unique_authored_it = unique_authored_by_program.find(program);
+    if (unique_authored_it != unique_authored_by_program.end()) {
+      out_authored_key = unique_authored_it->second;
+      if (strict_authored_mode) {
+        L_WARN("RMF strict resolve fell back to unique-program mapping for source bank={} program={} -> authored bank={} program={}",
+               static_cast<unsigned>(source_bank),
+               static_cast<unsigned>(program),
+               static_cast<unsigned>(out_authored_key.first),
+               static_cast<unsigned>(out_authored_key.second));
       }
+      return true;
     }
 
     if (strict_authored_mode) {
@@ -2032,7 +2041,7 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
   }
 
   SF2HSBConvertOptions convert_options{};
-  if (ConversionOptions::the().forceZmfExport()) {
+  if (prefer_zmf_assets || ConversionOptions::the().forceZmfExport()) {
     convert_options.forceZsb = 1;
     convert_options.extendedAdsr = 1;
   }
@@ -2157,6 +2166,7 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
 
   std::map<SourceInstrumentRef, ProgramADSRSource> program_adsr_sources;
   std::map<AuthoredInstrumentKey, std::vector<uint32_t>> base_sample_indices_by_authored;
+  std::set<AuthoredInstrumentKey> materialized_authored_keys;
   const auto temp_dir = std::filesystem::temp_directory_path() /
       ("vgmtrans-rmf-authored-" +
        std::to_string(static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())));
@@ -2192,6 +2202,7 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
     const auto representative_binding_it = representative_binding_by_program_by_authored.find(authored_key);
 
     if (isPercussionAuthoredBank(authored_key.first)) {
+      bool materialized_any_percussion_variant = false;
       const auto used_variant_percussion_it = used_variant_programs_by_authored.find(authored_key);
       if (used_variant_percussion_it == used_variant_programs_by_authored.end() ||
           used_variant_percussion_it->second.empty()) {
@@ -2273,6 +2284,8 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
           continue;
         }
 
+        materialized_any_percussion_variant = true;
+
         if (!has_canonical_asset) {
           uint32_t new_asset_id = 0;
           if (BAERmfEditorDocument_GetSampleAssetIDForSample(document, sample_index, &new_asset_id) == BAE_NO_ERROR) {
@@ -2351,6 +2364,10 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
         }
       }
 
+      if (materialized_any_percussion_variant) {
+        materialized_authored_keys.insert(materialized_authored_key);
+      }
+
       continue;
     }
 
@@ -2384,6 +2401,8 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
       L_ERROR("Failed to query RMF sample count after cloning authored instrument");
       return false;
     }
+
+    materialized_authored_keys.insert(materialized_authored_key);
 
     {
       auto &base_sample_indices = base_sample_indices_by_authored[authored_key];
@@ -2557,6 +2576,13 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
           continue;
         }
 
+        const auto canonical_authored_it = canonical_authored_by_authored.find(authored_key);
+        const AuthoredInstrumentKey materialized_authored_key =
+            canonical_authored_it != canonical_authored_by_authored.end() ? canonical_authored_it->second : authored_key;
+        if (materialized_authored_keys.find(materialized_authored_key) == materialized_authored_keys.end()) {
+          continue;
+        }
+
         auto variants_it = variants_by_authored.find(authored_key);
         if (variants_it == variants_by_authored.end()) {
           continue;
@@ -2571,17 +2597,19 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
           }
         }
 
-        if (!has_program_variants) {
-          continue;
+        std::vector<SourceInstrumentRef> target_programs;
+        if (has_program_variants) {
+          target_programs = collectVariantProgramsForNote(
+              note_info.note,
+              note_info.velocity,
+              variants_it->second,
+              default_program);
+          if (target_programs.empty()) {
+            continue;
+          }
         }
-
-        const auto target_programs = collectVariantProgramsForNote(
-            note_info.note,
-            note_info.velocity,
-            variants_it->second,
-            default_program);
-        if (target_programs.empty()) {
-          continue;
+        else {
+          target_programs.push_back(default_program);
         }
 
         if (strict_authored_mode) {
@@ -2658,6 +2686,9 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
       const auto canonical_it = canonical_authored_by_authored.find(authored_key);
       const AuthoredInstrumentKey materialized =
           (canonical_it != canonical_authored_by_authored.end()) ? canonical_it->second : authored_key;
+      if (materialized_authored_keys.find(materialized) == materialized_authored_keys.end()) {
+        continue;
+      }
       const auto used_it = used_variant_programs_by_authored.find(materialized);
       if (used_it == used_variant_programs_by_authored.end() || used_it->second.empty()) {
         continue;
@@ -2795,11 +2826,230 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
     }
   }
 
+  auto resolve_target_for_reference =
+      [&](uint16_t source_bank,
+          uint8_t source_program,
+          uint8_t note,
+          uint8_t velocity,
+          SourceInstrumentRef &target_program) {
+        AuthoredInstrumentKey authored_key{0, 0};
+        if (!resolve_authored_key_for_reference(source_bank, source_program, authored_key)) {
+          return false;
+        }
+
+        const auto canonical_authored_it = canonical_authored_by_authored.find(authored_key);
+        const AuthoredInstrumentKey materialized_authored_key =
+            canonical_authored_it != canonical_authored_by_authored.end() ? canonical_authored_it->second : authored_key;
+        if (materialized_authored_keys.find(materialized_authored_key) == materialized_authored_keys.end()) {
+          return false;
+        }
+
+        const auto variants_it = variants_by_authored.find(authored_key);
+        if (variants_it == variants_by_authored.end()) {
+          return false;
+        }
+
+        const SourceInstrumentRef default_program = default_variant_program_by_authored[authored_key];
+        auto target_programs = collectVariantProgramsForNote(
+            note,
+            velocity,
+            variants_it->second,
+            default_program);
+        if (target_programs.empty()) {
+          target_program = default_program;
+        }
+        else {
+          target_program = target_programs.front();
+        }
+        return true;
+      };
+
+  // Final safety pass: if any non-embedded references remain, map them to a
+  // materialized authored target so playback cannot fall back to bank defaults.
+  uint32_t safety_track_remaps = 0;
+  uint32_t safety_note_remaps = 0;
+  uint32_t safety_source_remaps = 0;
+  std::map<SourceInstrumentRef, SourceInstrumentRef> safety_source_to_target;
+  if (BAERmfEditorDocument_GetTrackCount(document, &track_count) == BAE_NO_ERROR) {
+    for (uint16_t t = 0; t < track_count; ++t) {
+      BAERmfEditorTrackInfo track_info{};
+      if (BAERmfEditorDocument_GetTrackInfo(document, t, &track_info) == BAE_NO_ERROR) {
+        if (track_info.bank != kEmbeddedTargetBanks[0] &&
+            track_info.bank != kEmbeddedTargetBanks[1] &&
+            track_info.bank != kEmbeddedTargetBanks[2]) {
+          SourceInstrumentRef remapped_target{track_info.bank, track_info.program};
+          if (resolve_target_for_reference(track_info.bank,
+                                           track_info.program,
+                                           track_info.program,
+                                           127,
+                                           remapped_target)) {
+            safety_source_to_target[{track_info.bank, track_info.program}] = remapped_target;
+            track_info.bank = remapped_target.first;
+            track_info.program = remapped_target.second;
+            if (BAERmfEditorDocument_SetTrackInfo(document, t, &track_info) == BAE_NO_ERROR) {
+              ++safety_track_remaps;
+            }
+          }
+        }
+      }
+
+      uint32_t note_count = 0;
+      if (BAERmfEditorDocument_GetNoteCount(document, t, &note_count) != BAE_NO_ERROR) {
+        continue;
+      }
+
+      for (uint32_t n = 0; n < note_count; ++n) {
+        BAERmfEditorNoteInfo note_info{};
+        if (BAERmfEditorDocument_GetNoteInfo(document, t, n, &note_info) != BAE_NO_ERROR) {
+          continue;
+        }
+
+        if (note_info.bank == kEmbeddedTargetBanks[0] ||
+            note_info.bank == kEmbeddedTargetBanks[1] ||
+            note_info.bank == kEmbeddedTargetBanks[2]) {
+          continue;
+        }
+
+        SourceInstrumentRef remapped_target{note_info.bank, note_info.program};
+        if (!resolve_target_for_reference(note_info.bank,
+                                          note_info.program,
+                                          note_info.note,
+                                          note_info.velocity,
+                                          remapped_target)) {
+          continue;
+        }
+
+        safety_source_to_target[{note_info.bank, note_info.program}] = remapped_target;
+        note_info.bank = remapped_target.first;
+        note_info.program = remapped_target.second;
+        if (BAERmfEditorDocument_SetNoteInfo(document, t, n, &note_info) == BAE_NO_ERROR) {
+          ++safety_note_remaps;
+        }
+      }
+    }
+  }
+
+  for (const auto &[source_ref, target_ref] : safety_source_to_target) {
+    if (source_ref == target_ref) {
+      continue;
+    }
+    if (BAERmfEditorDocument_RemapInstrumentReferences(document,
+                                                       source_ref.first,
+                                                       source_ref.second,
+                                                       target_ref.first,
+                                                       target_ref.second) == BAE_NO_ERROR) {
+      ++safety_source_remaps;
+    }
+  }
+
+  if (strict_authored_mode &&
+      (safety_track_remaps > 0 || safety_note_remaps > 0 || safety_source_remaps > 0)) {
+    L_WARN("RMF strict safety remap adjusted {} track refs, {} note refs, and {} source bank/program remaps that still pointed outside embedded banks",
+           static_cast<unsigned>(safety_track_remaps),
+           static_cast<unsigned>(safety_note_remaps),
+           static_cast<unsigned>(safety_source_remaps));
+  }
+
+  auto track_has_cc_value = [document](uint16_t track_index, unsigned char controller, unsigned char value) {
+    uint32_t event_count = 0;
+    if (BAERmfEditorDocument_GetTrackCCEventCount(document, track_index, controller, &event_count) != BAE_NO_ERROR) {
+      return false;
+    }
+    for (uint32_t i = 0; i < event_count; ++i) {
+      uint32_t tick = 0;
+      unsigned char event_value = 0;
+      if (BAERmfEditorDocument_GetTrackCCEvent(document,
+                                               track_index,
+                                               controller,
+                                               i,
+                                               &tick,
+                                               &event_value) != BAE_NO_ERROR) {
+        continue;
+      }
+      (void)tick;
+      if (event_value == value) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Song playback on channel 10 defaults to percussion-note patch selection unless
+  // the track explicitly sets USE_NORM_BANK. Note-audition ignores this path, so
+  // force normal-bank mode whenever channel 10 references embedded authored banks.
+  uint32_t channel10_normbank_forced_tracks = 0;
+  if (BAERmfEditorDocument_GetTrackCount(document, &track_count) == BAE_NO_ERROR) {
+    for (uint16_t t = 0; t < track_count; ++t) {
+      BAERmfEditorTrackInfo track_info{};
+      if (BAERmfEditorDocument_GetTrackInfo(document, t, &track_info) != BAE_NO_ERROR) {
+        continue;
+      }
+      if (track_info.channel != 9) {
+        continue;
+      }
+
+      bool uses_embedded_targets =
+          track_info.bank == kEmbeddedTargetBanks[0] ||
+          track_info.bank == kEmbeddedTargetBanks[1] ||
+          track_info.bank == kEmbeddedTargetBanks[2];
+
+      uint32_t note_count = 0;
+      if (!uses_embedded_targets &&
+          BAERmfEditorDocument_GetNoteCount(document, t, &note_count) == BAE_NO_ERROR) {
+        for (uint32_t n = 0; n < note_count; ++n) {
+          BAERmfEditorNoteInfo note_info{};
+          if (BAERmfEditorDocument_GetNoteInfo(document, t, n, &note_info) != BAE_NO_ERROR) {
+            continue;
+          }
+          if (note_info.bank == kEmbeddedTargetBanks[0] ||
+              note_info.bank == kEmbeddedTargetBanks[1] ||
+              note_info.bank == kEmbeddedTargetBanks[2]) {
+            uses_embedded_targets = true;
+            break;
+          }
+        }
+      }
+
+      if (!uses_embedded_targets) {
+        continue;
+      }
+
+      const bool has_nrpn_msb = track_has_cc_value(t, 99, 5);
+      const bool has_nrpn_lsb = track_has_cc_value(t, 98, 0);
+      const bool has_use_norm_bank = track_has_cc_value(t, 6, 3);
+      if (has_nrpn_msb && has_nrpn_lsb && has_use_norm_bank) {
+        continue;
+      }
+
+      BAERmfEditorDocument_AddTrackCCEvent(document, t, 99, 0, 5);
+      BAERmfEditorDocument_AddTrackCCEvent(document, t, 98, 0, 0);
+      BAERmfEditorDocument_AddTrackCCEvent(document, t, 6, 0, 3);
+      ++channel10_normbank_forced_tracks;
+    }
+  }
+
+  if (strict_authored_mode && channel10_normbank_forced_tracks > 0) {
+    L_WARN("RMF strict forced USE_NORM_BANK on {} channel-10 track(s) that reference embedded targets",
+           static_cast<unsigned>(channel10_normbank_forced_tracks));
+  }
+
   // Remap all remaining melodic instrument references. Percussion-bank notes were
   // already moved to embedded target banks above, so they can't be stolen by a melodic remap that
   // happens to share the same source bank=0 and program number.
   for (const auto &[authored_key, source_banks] : source_document_banks_by_instrument) {
     if (isPercussionAuthoredBank(authored_key.first)) {
+      continue;
+    }
+
+    const auto canonical_authored_it = canonical_authored_by_authored.find(authored_key);
+    const AuthoredInstrumentKey materialized_authored_key =
+        canonical_authored_it != canonical_authored_by_authored.end() ? canonical_authored_it->second : authored_key;
+    if (materialized_authored_keys.find(materialized_authored_key) == materialized_authored_keys.end()) {
+      if (strict_authored_mode) {
+        L_WARN("RMF strict skipping final remap for unmaterialized authored bank={} program={}",
+               static_cast<unsigned>(authored_key.first),
+               static_cast<unsigned>(authored_key.second));
+      }
       continue;
     }
 
@@ -2826,6 +3076,93 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
           default_target_program.first,
           default_target_program.second);
     }
+  }
+
+  if (strict_authored_mode) {
+    std::set<uint32_t> required_target_inst_ids;
+    for (const auto &[authored_key, used_targets] : used_variant_programs_by_authored) {
+      (void)authored_key;
+      for (const auto &target_program : used_targets) {
+        required_target_inst_ids.insert(targetInstrumentInstID(target_program));
+      }
+    }
+
+    std::set<uint32_t> materialized_target_inst_ids;
+    uint32_t sample_count = 0;
+    if (BAERmfEditorDocument_GetSampleCount(document, &sample_count) == BAE_NO_ERROR) {
+      for (uint32_t sample_index = 0; sample_index < sample_count; ++sample_index) {
+        uint32_t inst_id = BAE_EDITOR_INST_ID_NONE;
+        if (BAERmfEditorDocument_GetInstIDForSample(document, sample_index, &inst_id) == BAE_NO_ERROR &&
+            inst_id != BAE_EDITOR_INST_ID_NONE) {
+          materialized_target_inst_ids.insert(inst_id);
+        }
+      }
+    }
+
+    uint32_t missing_required_target_ids = 0;
+    for (uint32_t required_id : required_target_inst_ids) {
+      if (materialized_target_inst_ids.find(required_id) == materialized_target_inst_ids.end()) {
+        ++missing_required_target_ids;
+      }
+    }
+
+    auto is_embedded_bank = [](uint16_t bank) {
+      return bank == kEmbeddedTargetBanks[0] ||
+             bank == kEmbeddedTargetBanks[1] ||
+             bank == kEmbeddedTargetBanks[2];
+    };
+
+    uint32_t non_embedded_track_defaults = 0;
+    uint32_t non_embedded_notes = 0;
+    uint32_t missing_embedded_default_inst_ids = 0;
+    uint32_t missing_embedded_note_inst_ids = 0;
+
+    uint16_t verify_track_count = 0;
+    if (BAERmfEditorDocument_GetTrackCount(document, &verify_track_count) == BAE_NO_ERROR) {
+      for (uint16_t t = 0; t < verify_track_count; ++t) {
+        BAERmfEditorTrackInfo track_info{};
+        if (BAERmfEditorDocument_GetTrackInfo(document, t, &track_info) == BAE_NO_ERROR) {
+          if (!is_embedded_bank(track_info.bank)) {
+            ++non_embedded_track_defaults;
+          }
+          else {
+            const uint32_t default_inst_id = targetInstrumentInstID(SourceInstrumentRef{track_info.bank, track_info.program});
+            if (materialized_target_inst_ids.find(default_inst_id) == materialized_target_inst_ids.end()) {
+              ++missing_embedded_default_inst_ids;
+            }
+          }
+        }
+
+        uint32_t note_count = 0;
+        if (BAERmfEditorDocument_GetNoteCount(document, t, &note_count) != BAE_NO_ERROR) {
+          continue;
+        }
+        for (uint32_t n = 0; n < note_count; ++n) {
+          BAERmfEditorNoteInfo note_info{};
+          if (BAERmfEditorDocument_GetNoteInfo(document, t, n, &note_info) != BAE_NO_ERROR) {
+            continue;
+          }
+          if (!is_embedded_bank(note_info.bank)) {
+            ++non_embedded_notes;
+            continue;
+          }
+          const uint32_t note_inst_id = targetInstrumentInstID(SourceInstrumentRef{note_info.bank, note_info.program});
+          if (materialized_target_inst_ids.find(note_inst_id) == materialized_target_inst_ids.end()) {
+            ++missing_embedded_note_inst_ids;
+          }
+        }
+      }
+    }
+
+    L_INFO("RMF strict verify: requiredTargetIDs={} materializedTargetIDs={} missingRequiredTargetIDs={}",
+           static_cast<unsigned>(required_target_inst_ids.size()),
+           static_cast<unsigned>(materialized_target_inst_ids.size()),
+           static_cast<unsigned>(missing_required_target_ids));
+    L_INFO("RMF strict verify refs: nonEmbeddedTrackDefaults={} nonEmbeddedNotes={} missingEmbeddedDefaultInstIDs={} missingEmbeddedNoteInstIDs={}",
+           static_cast<unsigned>(non_embedded_track_defaults),
+           static_cast<unsigned>(non_embedded_notes),
+           static_cast<unsigned>(missing_embedded_default_inst_ids),
+           static_cast<unsigned>(missing_embedded_note_inst_ids));
   }
 
   return true;
@@ -3213,9 +3550,10 @@ static bool requiresZmfOutput(const VGMColl &coll) {
 
 static std::filesystem::path selectRmfOutputPath(bool requires_zmf,
                                                  bool force_zmf,
-                                                 const std::filesystem::path &preferred_path) {
+                                                 const std::filesystem::path &preferred_path,
+                                                 bool request_zmf_by_extension) {
   std::filesystem::path output_path = preferred_path;
-  const bool prefer_zmf = preferred_path.extension() == ".zmf";
+  const bool prefer_zmf = request_zmf_by_extension;
   if (force_zmf || requires_zmf || prefer_zmf) {
     output_path.replace_extension(".zmf");
   }
@@ -3223,6 +3561,24 @@ static std::filesystem::path selectRmfOutputPath(bool requires_zmf,
     output_path.replace_extension(".rmf");
   }
   return output_path;
+}
+
+static std::string trimAsciiWhitespace(std::string value) {
+  auto not_space = [](unsigned char c) { return !std::isspace(c); };
+  value.erase(value.begin(),
+              std::find_if(value.begin(), value.end(), not_space));
+  value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(),
+              value.end());
+  return value;
+}
+
+static bool pathRequestsZmf(const std::filesystem::path &path) {
+  std::string extension = trimAsciiWhitespace(path.extension().string());
+  std::transform(extension.begin(),
+                 extension.end(),
+                 extension.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return extension == ".zmf";
 }
 
 } // namespace
@@ -3258,19 +3614,72 @@ bool saveAsRMF(const VGMColl &coll,
     return false;
   }
 
-  BAERmfEditorDocument_SetMidiStorageType(document, BAE_EDITOR_MIDI_STORAGE_CMID_BEST_EFFORT);
+  BAEResult midi_storage_result = BAERmfEditorDocument_SetMidiStorageType(document, BAE_EDITOR_MIDI_STORAGE_ECMI);
+  if (midi_storage_result != BAE_NO_ERROR) {
+    BAERmfEditorDocument_Delete(document);
+    return false;
+  }
+
+  auto count_total_notes = [document]() {
+    uint32_t total_notes = 0;
+    uint16_t current_track_count = 0;
+    if (BAERmfEditorDocument_GetTrackCount(document, &current_track_count) != BAE_NO_ERROR) {
+      return static_cast<uint32_t>(0);
+    }
+    for (uint16_t t = 0; t < current_track_count; ++t) {
+      uint32_t track_note_count = 0;
+      if (BAERmfEditorDocument_GetNoteCount(document, t, &track_note_count) == BAE_NO_ERROR) {
+        total_notes += track_note_count;
+      }
+    }
+    return total_notes;
+  };
+
+  uint16_t initial_track_count = 0;
+  if (BAERmfEditorDocument_GetTrackCount(document, &initial_track_count) != BAE_NO_ERROR ||
+      initial_track_count == 0) {
+    BAERmfEditorDocument_Delete(document);
+    return false;
+  }
+
+  const uint32_t initial_note_count = count_total_notes();
+  if (initial_note_count == 0) {
+    BAERmfEditorDocument_Delete(document);
+    return false;
+  }
 
   if (!coll.name().empty()) {
     BAERmfEditorDocument_SetInfo(document, TITLE_INFO, coll.name().c_str());
     BAERmfEditorDocument_SetInfo(document, COPYRIGHT_INFO, "Generated by vgmtrans (zefie's fork)");
   }
 
-  if (!embedAuthoredBankPrograms(document, coll)) {
+  const std::string requested_extension = trimAsciiWhitespace(filepath.extension().string());
+  const bool request_zmf_by_extension = pathRequestsZmf(filepath);
+
+  if (!embedAuthoredBankPrograms(document, coll, request_zmf_by_extension)) {
     BAERmfEditorDocument_Delete(document);
     return false;
   }
   ensureTrackControllerZeroAtTick0(document, 91);
   ensureTrackControllerZeroAtTick0(document, 93);
+
+  uint16_t final_track_count = 0;
+  if (BAERmfEditorDocument_GetTrackCount(document, &final_track_count) != BAE_NO_ERROR ||
+      final_track_count == 0) {
+    BAERmfEditorDocument_Delete(document);
+    return false;
+  }
+
+  const uint32_t final_note_count = count_total_notes();
+  if (final_note_count == 0) {
+    BAERmfEditorDocument_Delete(document);
+    return false;
+  }
+  L_INFO("RMF song verify: initialTracks={} initialNotes={} finalTracks={} finalNotes={} midiStorage=ECMI",
+         static_cast<unsigned>(initial_track_count),
+         static_cast<unsigned>(initial_note_count),
+         static_cast<unsigned>(final_track_count),
+         static_cast<unsigned>(final_note_count));
 
   if (BAERmfEditorDocument_Validate(document) != BAE_NO_ERROR) {
     BAERmfEditorDocument_Delete(document);
@@ -3279,8 +3688,17 @@ bool saveAsRMF(const VGMColl &coll,
 
   uint32_t zmf_reason = 0;
   const bool requires_zmf = BAERmfEditorDocument_RequiresZmf(document, &zmf_reason) != FALSE;
-  const bool force_zmf = ConversionOptions::the().forceZmfExport();
-  const std::filesystem::path resolved_output_path = selectRmfOutputPath(requires_zmf, force_zmf, filepath);
+  const bool force_zmf = ConversionOptions::the().forceZmfExport() || request_zmf_by_extension;
+  const std::filesystem::path resolved_output_path = selectRmfOutputPath(
+      requires_zmf,
+      force_zmf,
+      filepath,
+      request_zmf_by_extension);
+  L_INFO("RMF export decision: requested='{}' requires_zmf={} force_zmf={} resolved='{}'",
+         requested_extension,
+         requires_zmf,
+         force_zmf,
+         resolved_output_path.string());
   if (actual_filepath != nullptr) {
     *actual_filepath = resolved_output_path;
   }
