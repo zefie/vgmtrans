@@ -8,6 +8,7 @@
 
 #include "base/Types.h"
 #include "DBGVGMRoot.h"
+#include "RMFConversion.h"
 #include "RawFile.h"
 #include "SeqTrack.h"
 #include "StitchExport.h"
@@ -361,6 +362,22 @@ void collection_export(const std::vector<std::string>& args) {
 
   fmt::println("Exporting collection '{}' to {}...", coll->name(), dir.string());
   conversion::saveAs<conversion::Target::MIDI | conversion::Target::SF2>(*coll, dir);
+}
+
+void collection_export_rmf(const std::vector<std::string>& args) {
+  VGMColl* coll = getVGMColl(args[2]);
+  if (!coll)
+    return;
+
+  std::filesystem::path path = args[3];
+  fmt::println("Exporting collection '{}' to {}...", coll->name(), path.string());
+
+  std::filesystem::path actual_path;
+  if (conversion::saveAsRMF(*coll, path, &actual_path)) {
+    fmt::println("Done: {}", actual_path.string());
+  } else {
+    fmt::println("Failed to export RMF/ZMF.");
+  }
 }
 
 void instrumentset_list(const std::vector<std::string>&) {
@@ -794,6 +811,8 @@ void registerCommands() {
       {{"list", "", "List all collections", 2, collection_list},
        {"info", "<index>", "Show information about a collection", 3, collection_info},
        {"export", "<index> <dir>", "Export MIDI + SF2 to directory", 4, collection_export},
+       {"export-rmf", "<index> <path>", "Export collection as RMF/ZMF", 4,
+      collection_export_rmf},
        {"stitch", "<midi_path> <sf2_path> <coll_idx...>",
         "Stitch collections in order and export remapped MIDI + merged SF2", 5,
         collection_stitch}}};
