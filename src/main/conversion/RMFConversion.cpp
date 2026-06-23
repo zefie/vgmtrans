@@ -16,7 +16,6 @@
 #include <filesystem>
 #include <cmath>
 
-#include "common.h"
 #include "ConversionContext.h"
 #include "GenSnd.h"
 #include "LogManager.h"
@@ -543,8 +542,8 @@ static bool collectRegionSampleBindings(const VGMColl &coll, std::vector<RegionS
   }
   else {
     for (auto *instr_set : coll.instrSets()) {
-      if (instr_set->sampColl != nullptr) {
-        final_samp_colls.push_back(instr_set->sampColl);
+      if (instr_set->sampColl() != nullptr) {
+        final_samp_colls.push_back(instr_set->sampColl());
       }
     }
   }
@@ -557,7 +556,7 @@ static bool collectRegionSampleBindings(const VGMColl &coll, std::vector<RegionS
                                                              size_t requested_sample_num,
                                                              VGMSampColl *&resolved_samp_coll,
                                                              size_t &resolved_sample_num) {
-    if (preferred_samp_coll != nullptr && requested_sample_num < preferred_samp_coll->samples.size()) {
+    if (preferred_samp_coll != nullptr && requested_sample_num < preferred_samp_coll->samples().size()) {
       resolved_samp_coll = preferred_samp_coll;
       resolved_sample_num = requested_sample_num;
       return true;
@@ -569,7 +568,7 @@ static bool collectRegionSampleBindings(const VGMColl &coll, std::vector<RegionS
         continue;
       }
 
-      const size_t sample_count = candidate_samp_coll->samples.size();
+      const size_t sample_count = candidate_samp_coll->samples().size();
       if (requested_sample_num < cumulative_offset + sample_count) {
         resolved_samp_coll = candidate_samp_coll;
         resolved_sample_num = requested_sample_num - cumulative_offset;
@@ -588,21 +587,24 @@ static bool collectRegionSampleBindings(const VGMColl &coll, std::vector<RegionS
       for (auto *rgn : instr->regions()) {
         VGMSampColl *samp_coll = rgn->sampCollPtr;
         if (samp_coll == nullptr) {
-          samp_coll = set->sampColl != nullptr ? set->sampColl : final_samp_colls[0];
+          samp_coll = set->sampColl() != nullptr ? set->sampColl() : final_samp_colls[0];
         }
 
-        if (samp_coll == nullptr || samp_coll->samples.empty()) {
+        if (samp_coll == nullptr || samp_coll->samples().empty()) {
           continue;
         }
 
         size_t real_sample_num = 0;
         if (rgn->sampOffset != -1) {
           bool found = false;
-          for (uint32_t s = 0; s < samp_coll->samples.size(); ++s) {
-            const auto *sample = samp_coll->samples[s];
-            if (rgn->sampOffset == sample->offset() ||
-                rgn->sampOffset == sample->offset() - samp_coll->offset() - samp_coll->sampDataOffset) {
-              if (rgn->sampDataLength != -1 && rgn->sampDataLength != sample->dataLength) {
+          const uint32_t requested_samp_offset = static_cast<uint32_t>(rgn->sampOffset);
+          const uint32_t requested_samp_data_length =
+              rgn->sampDataLength != -1 ? static_cast<uint32_t>(rgn->sampDataLength) : 0;
+          for (uint32_t s = 0; s < samp_coll->samples().size(); ++s) {
+            const auto *sample = samp_coll->samples()[s];
+            if (requested_samp_offset == sample->offset() ||
+                requested_samp_offset == sample->offset() - samp_coll->offset() - samp_coll->sampDataOffset) {
+              if (rgn->sampDataLength != -1 && requested_samp_data_length != sample->dataLength) {
                 continue;
               }
               real_sample_num = s;
@@ -629,12 +631,12 @@ static bool collectRegionSampleBindings(const VGMColl &coll, std::vector<RegionS
           real_sample_num = resolved_sample_num;
         }
 
-        if (real_sample_num >= samp_coll->samples.size()) {
+        if (real_sample_num >= samp_coll->samples().size()) {
           continue;
         }
 
         bindings.push_back({
-            samp_coll->samples[real_sample_num],
+            samp_coll->samples()[real_sample_num],
             rgn,
             static_cast<uint16_t>(instr->bank),
             convertCollectionBankToDocumentBank(static_cast<uint16_t>(instr->bank)),
@@ -814,7 +816,7 @@ static bool shouldEnableSampleAndHold(const VGMRgn &region, bool has_loop) {
   return region.sustain_level > 0.01;
 }
 
-static bool rangesOverlap(uint8_t low_a, uint8_t high_a, uint8_t low_b, uint8_t high_b) {
+[[maybe_unused]] static bool rangesOverlap(uint8_t low_a, uint8_t high_a, uint8_t low_b, uint8_t high_b) {
   return !(high_a < low_b || high_b < low_a);
 }
 
@@ -2179,8 +2181,9 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
 
     const AuthoredInstrumentKey materialized_authored_key =
         canonical_authored_it != canonical_authored_by_authored.end() ? canonical_authored_it->second : authored_key;
-    const auto used_variant_it = used_variant_programs_by_authored.find(materialized_authored_key);
-    if (used_variant_it == used_variant_programs_by_authored.end() || used_variant_it->second.empty()) {
+    const auto used_variant_materialized_it = used_variant_programs_by_authored.find(materialized_authored_key);
+    if (used_variant_materialized_it == used_variant_programs_by_authored.end() ||
+        used_variant_materialized_it->second.empty()) {
       continue;
     }
 
@@ -2189,8 +2192,9 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
     const auto representative_binding_it = representative_binding_by_program_by_authored.find(authored_key);
 
     if (isPercussionAuthoredBank(authored_key.first)) {
-      const auto used_variant_it = used_variant_programs_by_authored.find(authored_key);
-      if (used_variant_it == used_variant_programs_by_authored.end() || used_variant_it->second.empty()) {
+      const auto used_variant_percussion_it = used_variant_programs_by_authored.find(authored_key);
+      if (used_variant_percussion_it == used_variant_programs_by_authored.end() ||
+          used_variant_percussion_it->second.empty()) {
         continue;
       }
 
@@ -2198,11 +2202,12 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
       if (binding_map_it == binding_by_region_by_authored.end()) {
         continue;
       }
-      const auto representative_binding_it = representative_binding_by_program_by_authored.find(authored_key);
+      const auto representative_binding_percussion_it = representative_binding_by_program_by_authored.find(authored_key);
 
       std::set<std::pair<const VGMRgn *, SourceInstrumentRef>> embedded_regions;
       for (const auto &variant : variants) {
-        if (variant.region == nullptr || used_variant_it->second.find(variant.target) == used_variant_it->second.end()) {
+        if (variant.region == nullptr ||
+            used_variant_percussion_it->second.find(variant.target) == used_variant_percussion_it->second.end()) {
           continue;
         }
         if (!embedded_regions.emplace(variant.region, variant.target).second) {
@@ -2224,7 +2229,6 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
         uint32_t resolved_loop_end = 0;
         const bool has_loop = resolveLoopPoints(*sample, *region, resolved_loop_start, resolved_loop_end) &&
                               resolved_loop_end > resolved_loop_start;
-        const bool sample_and_hold = shouldEnableSampleAndHold(*region, has_loop);
         const uint8_t root_key = resolveRootKey(*sample, *region);
         const int16_t split_volume = resolveSplitVolume(*sample, *region);
 
@@ -2313,9 +2317,10 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
         BAERmfEditorDocument_SetSampleInstID(document, sample_index, target_inst_id);
 
         const RegionSampleBinding *adsr_binding = binding_it->second;
-        if (strict_authored_mode && representative_binding_it != representative_binding_by_program_by_authored.end()) {
-          const auto rep_it = representative_binding_it->second.find(target_program);
-          if (rep_it != representative_binding_it->second.end() && rep_it->second != nullptr) {
+        if (strict_authored_mode &&
+            representative_binding_percussion_it != representative_binding_by_program_by_authored.end()) {
+          const auto rep_it = representative_binding_percussion_it->second.find(target_program);
+          if (rep_it != representative_binding_percussion_it->second.end() && rep_it->second != nullptr) {
             adsr_binding = rep_it->second;
           }
         }
@@ -2396,10 +2401,10 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
     for (const auto &variant : variants) {
       const SourceInstrumentRef target_program = variant.target;
       const uint32_t target_inst_id = targetInstrumentInstID(target_program);
-      const auto used_variant_it = used_variant_programs_by_authored.find(authored_key);
+      const auto used_variant_authored_it = used_variant_programs_by_authored.find(authored_key);
 
-      if (used_variant_it == used_variant_programs_by_authored.end() ||
-          used_variant_it->second.find(target_program) == used_variant_it->second.end()) {
+      if (used_variant_authored_it == used_variant_programs_by_authored.end() ||
+          used_variant_authored_it->second.find(target_program) == used_variant_authored_it->second.end()) {
         continue;
       }
 
@@ -2826,7 +2831,8 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document, const VGMC
   return true;
 }
 
-static bool embedSamplesAndRemapPrograms(BAERmfEditorDocument *document, const VGMColl &coll) {
+[[maybe_unused]] static bool embedSamplesAndRemapPrograms(BAERmfEditorDocument *document,
+                                                          const VGMColl &coll) {
   std::vector<RegionSampleBinding> bindings;
   if (!collectRegionSampleBindings(coll, bindings)) {
     return false;
@@ -3232,14 +3238,13 @@ bool saveAsRMF(const VGMColl &coll,
     return false;
   }
 
-  MidiFile *midi = coll.seq()->convertToMidi(&coll);
+  std::unique_ptr<MidiFile> midi = coll.seq()->convertToMidi(&coll);
   if (midi == nullptr) {
     return false;
   }
 
   std::vector<uint8_t> midi_buffer;
   midi->writeMidiToBuffer(midi_buffer);
-  delete midi;
 
   if (midi_buffer.empty()) {
     return false;
