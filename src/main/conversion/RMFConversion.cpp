@@ -1271,7 +1271,8 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
   }
   const bool has_materialized_temporary_instruments =
       count_collection_instruments() > instrument_count_before_presynth;
-  const bool strict_authored_mode = has_materialized_temporary_instruments;
+  (void)has_materialized_temporary_instruments;
+  const bool strict_authored_mode = false;
 
   auto post_synth_guard = [&coll]() {
     for (auto *instr_set : coll.instrSets()) {
@@ -1669,6 +1670,11 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
           }
           target_program = makeTargetInstrumentRefFromSlot(allocated_slot);
           used_target_slots.insert(allocated_slot);
+        }
+        else {
+          // Reserve the natural default slot so later authored keys with the same
+          // program number cannot collide with this target.
+          used_target_slots.insert(targetInstrumentSlot(target_program));
         }
         representative_binding_by_program.emplace(target_program, assignment.representative_binding);
         target_program_it = target_program_by_group_index.emplace(assignment.group_index, target_program).first;
