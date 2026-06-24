@@ -303,6 +303,12 @@ static uint8_t resolveRootKey(const VGMSamp &sample, const VGMRgn &region) {
   else if (sample.unityKey != -1) {
     root_key = sample.unityKey;
   }
+  else if (region.keyLow == region.keyHigh) {
+    // For note-specific one-shots (common in kits/sample maps), missing unity key
+    // metadata should default to the mapped key, not middle C, to avoid severe
+    // playback-rate/pitch errors.
+    root_key = region.keyLow;
+  }
 
   // Region coarse tune is a semitone offset from the keymap's nominal pitch.
   // RMF doesn't have a dedicated coarse tune field per split, so fold it into root key.
@@ -1880,17 +1886,17 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
       }
     }
 
-    const auto unique_authored_it = unique_authored_by_program.find(program);
-    if (unique_authored_it != unique_authored_by_program.end()) {
-      out_authored_key = unique_authored_it->second;
-      if (strict_authored_mode) {
+    if (strict_authored_mode) {
+      const auto unique_authored_it = unique_authored_by_program.find(program);
+      if (unique_authored_it != unique_authored_by_program.end()) {
+        out_authored_key = unique_authored_it->second;
         L_WARN("RMF strict resolve fell back to unique-program mapping for source bank={} program={} -> authored bank={} program={}",
                static_cast<unsigned>(source_bank),
                static_cast<unsigned>(program),
                static_cast<unsigned>(out_authored_key.first),
                static_cast<unsigned>(out_authored_key.second));
+        return true;
       }
-      return true;
     }
 
     if (strict_authored_mode) {
@@ -2091,18 +2097,10 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
   }
 
   std::map<AuthoredInstrumentKey, uint32_t> instrument_index_by_bank_program;
-  std::map<uint8_t, uint32_t> fallback_index_by_program;
   for (uint32_t instrument_index = 0; instrument_index < instrument_count; ++instrument_index) {
     BAERmfEditorBankInstrumentInfo instrument_info{};
     if (BAERmfEditorBank_GetInstrumentInfo(runtime.bank_token, instrument_index, &instrument_info) != BAE_NO_ERROR) {
       continue;
-    }
-
-    if (required_programs.find(instrument_info.program) != required_programs.end()) {
-      auto fallback = fallback_index_by_program.find(instrument_info.program);
-      if (fallback == fallback_index_by_program.end() || instrument_info.bank == 0) {
-        fallback_index_by_program[instrument_info.program] = instrument_index;
-      }
     }
 
     const AuthoredInstrumentKey instrument_key{
@@ -2137,37 +2135,12 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
       continue;
     }
 
-    const auto fallback = fallback_index_by_program.find(source_program);
-    if (fallback == fallback_index_by_program.end()) {
-      L_ERROR("Temporary Beatnik bank is missing bank {} program {} required for RMF export",
-              static_cast<unsigned>(authored_key.first),
-              static_cast<unsigned>(source_program));
-      return false;
-    }
-
-    if (strict_authored_mode) {
-      const auto authored_keys_for_program = authored_keys_by_program.find(source_program);
-      const bool has_unique_authored_program =
-          authored_keys_for_program != authored_keys_by_program.end() &&
-          authored_keys_for_program->second.size() == 1;
-      if (!has_unique_authored_program) {
-        L_ERROR("Temporary Beatnik bank is missing bank {} program {} required for RMF export",
-                static_cast<unsigned>(authored_key.first),
-                static_cast<unsigned>(source_program));
-        return false;
-      }
-
-      L_WARN("Temporary Beatnik bank is missing bank {} program {}; strict mode using unique program-only fallback",
-             static_cast<unsigned>(authored_key.first),
-             static_cast<unsigned>(source_program));
-      instrument_index_by_authored[authored_key] = fallback->second;
-      continue;
-    }
-
-    L_WARN("Temporary Beatnik bank is missing bank {} program {}; falling back to program-only match for RMF export",
+    // Program-only fallback can select the wrong instrument (same program number,
+    // different content), which manifests as completely wrong samples/pitch.
+    // For missing exact temp-bank matches, use direct sample embedding later instead.
+    L_WARN("Temporary Beatnik bank is missing exact bank {} program {}; using direct sample embedding for RMF export",
            static_cast<unsigned>(authored_key.first),
            static_cast<unsigned>(source_program));
-    instrument_index_by_authored[authored_key] = fallback->second;
   }
 
   std::map<SourceInstrumentRef, ProgramADSRSource> program_adsr_sources;
@@ -2207,7 +2180,11 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     const uint32_t default_target_inst_id = targetInstrumentInstID(default_target_program);
     const auto representative_binding_it = representative_binding_by_program_by_authored.find(authored_key);
 
-    if (isPercussionAuthoredBank(authored_key.first)) {
+    const bool needs_direct_embedding =
+        isPercussionAuthoredBank(authored_key.first) ||
+        (instrument_index_by_authored.find(authored_key) == instrument_index_by_authored.end());
+
+    if (needs_direct_embedding) {
       bool materialized_any_percussion_variant = false;
       const auto used_variant_percussion_it = used_variant_programs_by_authored.find(authored_key);
       if (used_variant_percussion_it == used_variant_programs_by_authored.end() ||
@@ -3039,6 +3016,24 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
            static_cast<unsigned>(channel10_normbank_forced_tracks));
   }
 
+  auto collectMaterializedTargetInstIDs = [document]() {
+    std::set<uint32_t> ids;
+    uint32_t sample_count = 0;
+    if (BAERmfEditorDocument_GetSampleCount(document, &sample_count) != BAE_NO_ERROR) {
+      return ids;
+    }
+    for (uint32_t sample_index = 0; sample_index < sample_count; ++sample_index) {
+      uint32_t inst_id = BAE_EDITOR_INST_ID_NONE;
+      if (BAERmfEditorDocument_GetInstIDForSample(document, sample_index, &inst_id) == BAE_NO_ERROR &&
+          inst_id != BAE_EDITOR_INST_ID_NONE) {
+        ids.insert(inst_id);
+      }
+    }
+    return ids;
+  };
+
+  const auto materialized_target_inst_ids_for_remap = collectMaterializedTargetInstIDs();
+
   // Remap all remaining melodic instrument references. Percussion-bank notes were
   // already moved to embedded target banks above, so they can't be stolen by a melodic remap that
   // happens to share the same source bank=0 and program number.
@@ -3062,6 +3057,16 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     const SourceInstrumentRef default_target_program = default_variant_program_by_authored[authored_key];
     for (uint16_t source_bank : source_banks) {
       if (source_bank == default_target_program.first && default_target_program.second == authored_key.second) {
+        continue;
+      }
+
+      // If this source bank/program already has embedded samples materialized, do not
+      // globally remap it to another target. Stealing an existing embedded slot (such as
+      // 0:1) can make playback hit a different instrument than the sample data authored there.
+      const SourceInstrumentRef source_ref{source_bank, authored_key.second};
+      const uint32_t source_inst_id = targetInstrumentInstID(source_ref);
+      if (materialized_target_inst_ids_for_remap.find(source_inst_id) !=
+          materialized_target_inst_ids_for_remap.end()) {
         continue;
       }
 
