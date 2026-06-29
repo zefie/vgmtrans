@@ -643,11 +643,14 @@ static bool collectRegionSampleBindings(const VGMColl &coll, std::vector<RegionS
           continue;
         }
 
+        uint16_t effective_bank = static_cast<uint16_t>(instr->bank);
+        effective_bank += static_cast<uint16_t>(instr->instrNum >> 7);
+
         bindings.push_back({
             samp_coll->samples()[real_sample_num],
             rgn,
-            static_cast<uint16_t>(instr->bank),
-            convertCollectionBankToDocumentBank(static_cast<uint16_t>(instr->bank)),
+            effective_bank,
+            convertCollectionBankToDocumentBank(effective_bank),
             static_cast<uint8_t>(instr->instrNum & 0x7f)
         });
       }
@@ -1248,7 +1251,7 @@ static bool trackUsesPercussionBankMode(BAERmfEditorDocument *document, uint16_t
 }
 
 static bool isPercussionAuthoredBank(uint8_t source_bank) {
-  return source_bank == static_cast<uint8_t>(127) || source_bank == static_cast<uint8_t>(128);
+  return source_bank == static_cast<uint8_t>(128);
 }
 
 static bool isPercussionDocumentBank(uint16_t bank) {
