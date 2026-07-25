@@ -629,6 +629,10 @@ endif()
 configure_file(${PROJECT_SOURCE_DIR}/bin/mame_roms.json mame_roms.json COPYONLY)
 target_compile_definitions(vgmtranscore PUBLIC "DEV_ENV_BUILD_TREE=\"${CMAKE_CURRENT_BINARY_DIR}\"")
 
+target_compile_definitions(vgmtranscore PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:NOMINMAX>
+)
+
 if(CMAKE_SYSTEM_NAME MATCHES "FreeBSD|OpenBSD|Linux")
   if(NOT VGMTRANS_DATA_DIR)
     if(IS_ABSOLUTE "${CMAKE_INSTALL_DATADIR}")

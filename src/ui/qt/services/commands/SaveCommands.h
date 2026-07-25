@@ -205,18 +205,18 @@ public:
 };
 
 inline VGMColl* resolveCollectionForCompleteSequenceExport(VGMSeq* seq, const char* formatName) {
-  if (seq == nullptr || seq->assocColls.empty()) {
+  if (seq == nullptr || !seq->hasAssocColls()) {
     return nullptr;
   }
 
-  if (seq->assocColls.size() > 1) {
+  if (seq->assocColls().size() > 1) {
     pRoot->UI_toast(std::string("More than one collection is associated with the selected sequence. The first associated collection will be used for ") +
                         formatName + " export.",
                     ToastType::Warning,
                     12000);
   }
 
-  return seq->assocColls.front();
+  return seq->assocColls().front();
 }
 
 inline std::vector<VGMColl*> resolveCollectionsForCompleteSequenceExport(const std::vector<VGMSeq*>& sequences,
@@ -357,13 +357,22 @@ class ExportAsRMFCompleteCommand : public Command {
 public:
   void execute(CommandContext& context) override {
     auto& itemContext = dynamic_cast<ItemListCommandContext<VGMFile>&>(context);
-    auto sequences = extractSequencesForCompleteExport(itemContext.items());
+
+    // Convert span → vector
+    std::vector<VGMFile*> files(itemContext.items().begin(),
+                                itemContext.items().end());
+
+    // Now call the function
+    auto sequences = extractSequencesForCompleteExport(files);
+
     auto collections = resolveCollectionsForCompleteSequenceExport(sequences, "RMF");
     if (collections.empty()) {
-      pRoot->UI_toast("This action requires the selected sequence to belong to a collection with instruments and samples.",
-                      ToastType::Error,
-                      12000);
-      return;
+        pRoot->UI_toast(
+            "This action requires the selected sequence to belong to a collection with instruments and samples.",
+            ToastType::Error,
+            12000
+        );
+        return;
     }
 
     exportCollectionsAsRMF(collections);
@@ -382,7 +391,10 @@ class ExportAsRMICompleteCommand : public Command {
 public:
   void execute(CommandContext& context) override {
     auto& itemContext = dynamic_cast<ItemListCommandContext<VGMFile>&>(context);
-    auto sequences = extractSequencesForCompleteExport(itemContext.items());
+	auto itemsVec = std::vector<VGMFile*>(itemContext.items().begin(),
+                                      itemContext.items().end());
+
+	auto sequences = extractSequencesForCompleteExport(itemsVec);
     auto collections = resolveCollectionsForCompleteSequenceExport(sequences, "RMI");
     if (collections.empty()) {
       pRoot->UI_toast("This action requires the selected sequence to belong to a collection with instruments and samples.",
@@ -405,9 +417,11 @@ public:
 
 class ExportCollAsRMFCommand : public ItemListCommand<VGMColl> {
 public:
-  void executeItems(std::vector<VGMColl*> collections) const override {
-    exportCollectionsAsRMF(collections);
-  }
+	void executeItems(std::span<VGMColl* const> collections) const override
+	{
+		std::vector<VGMColl*> vec(collections.begin(), collections.end());
+		exportCollectionsAsRMF(vec);
+	}
 
   [[nodiscard]] std::string name() const override { return "Export as RMF"; }
   [[nodiscard]] std::optional<MenuPath> menuPath() const override { return MenuPaths::Convert; }
@@ -415,10 +429,11 @@ public:
 
 class ExportCollAsRMICommand : public ItemListCommand<VGMColl> {
 public:
-  void executeItems(std::vector<VGMColl*> collections) const override {
-    exportCollectionsAsRMI(collections);
+  void executeItems(std::span<VGMColl* const> collections) const override
+  {
+    std::vector<VGMColl*> vec(collections.begin(), collections.end());
+    exportCollectionsAsRMI(vec);
   }
-
   [[nodiscard]] std::string name() const override { return "Export as RMI"; }
   [[nodiscard]] std::optional<MenuPath> menuPath() const override { return MenuPaths::Convert; }
 };

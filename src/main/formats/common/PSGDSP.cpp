@@ -13,6 +13,10 @@
 #include <iterator>
 #include <numeric>
 
+#ifndef M_PI
+#define M_PI 3.141592653589793
+#endif
+
 namespace psg {
 
 std::vector<u8> synthesizeLfsrNoisePCM16(u32 sampleCount, u16 lfsrSeed, u16 lfsrTap) {

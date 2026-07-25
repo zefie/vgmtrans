@@ -348,6 +348,10 @@ install(TARGETS vgmtrans
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 
+target_compile_definitions(vgmtrans PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:NOMINMAX>
+)
+
 if (NOT NO_QT_DEPLOY)
   qt_generate_deploy_app_script(
       TARGET vgmtrans
