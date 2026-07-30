@@ -18,16 +18,12 @@
 #include <filesystem>
 #include <cmath>
 
-#include "ConversionContext.h"
 #include "GenSnd.h"
 #include "LogManager.h"
 #include "MidiFile.h"
 #include "NeoBAE.h"
 #include "Options.h"
 #include "RMFConversion.h"
-#include "SF2Conversion.h"
-#include "SF2File.h"
-#include "SynthFile.h"
 #include "ScaleConversion.h"
 #include "VGMColl.h"
 #include "VGMInstrSet.h"
@@ -35,10 +31,6 @@
 #include "VGMSamp.h"
 #include "VGMSampColl.h"
 #include "VGMSeq.h"
-
-extern "C" {
-#include "sf2_hsb_converter.h"
-}
 
 namespace conversion {
 
@@ -242,6 +234,12 @@ static uint32_t targetInstrumentInstID(const SourceInstrumentRef &target) {
 
 static uint16_t convertCollectionBankToDocumentBank(uint16_t source_bank);
 
+constexpr unsigned char kZbfUseSampleRate = 0x08;
+constexpr unsigned char kZbfSampleAndHold = 0x04;
+constexpr unsigned char kZbfEnableInterpolate = 0x80;
+constexpr unsigned char kZbfUseSoundModifierAsRootKey = 0x08;
+constexpr unsigned char kZbfAdvancedInterpolation = 0x80;
+
 struct TempDirGuard {
   std::filesystem::path path;
 
@@ -250,34 +248,6 @@ struct TempDirGuard {
     std::filesystem::remove_all(path, ec);
   }
 };
-
-struct BaeRuntimeGuard {
-  bool is_setup = false;
-  BAEMixer mixer = nullptr;
-  BAEBankToken bank_token = nullptr;
-  unsigned char *bank_data = nullptr;
-
-  ~BaeRuntimeGuard() {
-    if (bank_token != nullptr && mixer != nullptr) {
-      BAEMixer_UnloadBank(mixer, bank_token);
-    }
-    if (bank_data != nullptr) {
-      XDisposePtr(reinterpret_cast<XPTR>(bank_data));
-    }
-    if (mixer != nullptr) {
-      BAEMixer_Delete(mixer);
-    }
-    if (is_setup) {
-      BAE_Cleanup();
-    }
-  }
-};
-
-constexpr unsigned char kZbfUseSampleRate = 0x08;
-constexpr unsigned char kZbfSampleAndHold = 0x04;
-constexpr unsigned char kZbfEnableInterpolate = 0x80;
-constexpr unsigned char kZbfUseSoundModifierAsRootKey = 0x08;
-constexpr unsigned char kZbfAdvancedInterpolation = 0x80;
 
 static int8_t convertRegionPanToRmfPan(const VGMRgn &region) {
   const double clamped_pan = std::clamp(region.pan, 0.0, 1.0);
@@ -644,7 +614,9 @@ static bool collectRegionSampleBindings(const VGMColl &coll, std::vector<RegionS
         }
 
         uint16_t effective_bank = static_cast<uint16_t>(instr->bank);
-        effective_bank += static_cast<uint16_t>(instr->instrNum >> 7);
+        if (effective_bank == 0) {
+          effective_bank = static_cast<uint16_t>(instr->instrNum >> 7);
+        }
 
         bindings.push_back({
             samp_coll->samples()[real_sample_num],
@@ -1260,8 +1232,8 @@ static bool isPercussionDocumentBank(uint16_t bank) {
 }
 
 static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
-                                      const VGMColl &coll,
-                                      bool prefer_zmf_assets) {
+                                       const VGMColl &coll,
+                                       [[maybe_unused]] bool prefer_zmf_assets) {
   auto count_collection_instruments = [&coll]() {
     size_t count = 0;
     for (const auto *set : coll.instrSets()) {
@@ -2026,128 +1998,7 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     }
   }
 
-  // Build the SF2 directly from the current exportInstrs() without calling createSF2File,
-  // which would internally invoke prepareForExport(nullptr) → cleanupAfterExport and thereby
-  // delete any materialized temp instruments (and leave dangling region pointers in bindings).
-  auto synthfile = std::unique_ptr<SynthFile>(createSynthFile(coll.instrSets(), coll.sampColls()));
-  if (!synthfile) {
-    L_ERROR("Failed to create temporary SF2 for RMF bank authoring");
-    return false;
-  }
-  const auto context = ConversionContext::fromOptions(ConversionOptions::the(), SynthTarget::SoundFont);
-  auto sf2file = std::make_unique<SF2File>(synthfile.get(), context);
-  const std::vector<uint8_t> sf2_buffer = sf2file->saveToMem();
-  if (sf2_buffer.empty()) {
-    L_ERROR("Failed to serialize temporary SF2 for RMF bank authoring");
-    return false;
-  }
-
-  BaeRuntimeGuard runtime;
-  if (BAE_Setup() != BAE_NO_ERROR) {
-    L_ERROR("BAE_Setup failed while preparing RMF bank authoring");
-    return false;
-  }
-  runtime.is_setup = true;
-
-  runtime.mixer = BAEMixer_New();
-  if (runtime.mixer == nullptr) {
-    L_ERROR("BAEMixer_New failed while preparing RMF bank authoring");
-    return false;
-  }
-
-  SF2HSBConvertOptions convert_options{};
-  if (prefer_zmf_assets || ConversionOptions::the().forceZmfExport()) {
-    convert_options.forceZsb = 1;
-    convert_options.extendedAdsr = 1;
-  }
-  else {
-    convert_options.forceHsb = 1;
-  }
-  SF2HSBConvertReport convert_report{};
-  char error_buffer[512]{};
-  uint32_t bank_size = 0;
-  BAEResult convert_result = SF2HSB_ConvertBankMemory(runtime.mixer,
-                                                      sf2_buffer.data(),
-                                                      sf2_buffer.size(),
-                                                      &convert_options,
-                                                      &convert_report,
-                                                      error_buffer,
-                                                      sizeof(error_buffer),
-                                                      &runtime.bank_data,
-                                                      &bank_size);
-  if (convert_result != BAE_NO_ERROR) {
-    L_ERROR("Failed to author in-memory Beatnik bank for RMF export (BAE error #{}): {}",
-            static_cast<int>(convert_result),
-            error_buffer[0] != '\0' ? error_buffer : "unknown error");
-    return false;
-  }
-
-  BAEResult bank_result = BAEMixer_AddBankFromMemory(runtime.mixer,
-                                                     runtime.bank_data,
-                                                     bank_size,
-                                                     &runtime.bank_token);
-  if (bank_result != BAE_NO_ERROR) {
-    L_ERROR("Failed to load in-memory Beatnik bank for RMF export (BAE error #{})",
-            static_cast<int>(bank_result));
-    return false;
-  }
-
-  uint32_t instrument_count = 0;
-  if (BAERmfEditorBank_GetInstrumentCount(runtime.bank_token, &instrument_count) != BAE_NO_ERROR ||
-      instrument_count == 0) {
-    L_ERROR("Temporary Beatnik bank did not expose any instruments for RMF export");
-    return false;
-  }
-
-  std::map<AuthoredInstrumentKey, uint32_t> instrument_index_by_bank_program;
-  for (uint32_t instrument_index = 0; instrument_index < instrument_count; ++instrument_index) {
-    BAERmfEditorBankInstrumentInfo instrument_info{};
-    if (BAERmfEditorBank_GetInstrumentInfo(runtime.bank_token, instrument_index, &instrument_info) != BAE_NO_ERROR) {
-      continue;
-    }
-
-    const AuthoredInstrumentKey instrument_key{
-      normalizeSourceBankForAuthoredLookup(instrument_info.bank),
-      instrument_info.program,
-    };
-    if (source_instruments.find(instrument_key) != source_instruments.end() &&
-        instrument_index_by_bank_program.find(instrument_key) == instrument_index_by_bank_program.end()) {
-      instrument_index_by_bank_program[instrument_key] = instrument_index;
-    }
-  }
-
-  std::map<AuthoredInstrumentKey, uint32_t> instrument_index_by_authored;
-  for (const auto &[source_bank, source_program] : source_instruments) {
-    const AuthoredInstrumentKey authored_key{source_bank, source_program};
-
-    auto exact = instrument_index_by_bank_program.find(authored_key);
-    if (exact != instrument_index_by_bank_program.end()) {
-      instrument_index_by_authored[authored_key] = exact->second;
-      if (strict_authored_mode) {
-        L_INFO("RMF strict temp-bank exact match authored bank={} program={} -> instrumentIndex={}",
-               static_cast<unsigned>(authored_key.first),
-               static_cast<unsigned>(authored_key.second),
-               static_cast<unsigned>(exact->second));
-      }
-      continue;
-    }
-
-    if (isPercussionAuthoredBank(authored_key.first)) {
-      // SF2 percussion presets may be expanded as per-note instruments in the temporary
-      // bank; do not fall back to a melodic program-only match.
-      continue;
-    }
-
-    // Program-only fallback can select the wrong instrument (same program number,
-    // different content), which manifests as completely wrong samples/pitch.
-    // For missing exact temp-bank matches, use direct sample embedding later instead.
-    L_WARN("Temporary Beatnik bank is missing exact bank {} program {}; using direct sample embedding for RMF export",
-           static_cast<unsigned>(authored_key.first),
-           static_cast<unsigned>(source_program));
-  }
-
   std::map<SourceInstrumentRef, ProgramADSRSource> program_adsr_sources;
-  std::map<AuthoredInstrumentKey, std::vector<uint32_t>> base_sample_indices_by_authored;
   std::set<AuthoredInstrumentKey> materialized_authored_keys;
   const auto temp_dir = std::filesystem::temp_directory_path() /
       ("vgmtrans-rmf-authored-" +
@@ -2179,29 +2030,20 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
       continue;
     }
 
-    const SourceInstrumentRef default_target_program = default_variant_program_by_authored[authored_key];
-    const uint32_t default_target_inst_id = targetInstrumentInstID(default_target_program);
-    const auto representative_binding_it = representative_binding_by_program_by_authored.find(authored_key);
+    bool materialized_any_percussion_variant = false;
+    const auto used_variant_percussion_it = used_variant_programs_by_authored.find(authored_key);
+    if (used_variant_percussion_it == used_variant_programs_by_authored.end() ||
+        used_variant_percussion_it->second.empty()) {
+      continue;
+    }
 
-    const bool needs_direct_embedding =
-        isPercussionAuthoredBank(authored_key.first) ||
-        (instrument_index_by_authored.find(authored_key) == instrument_index_by_authored.end());
+    const auto binding_map_it = binding_by_region_by_authored.find(authored_key);
+    if (binding_map_it == binding_by_region_by_authored.end()) {
+      continue;
+    }
+    const auto representative_binding_percussion_it = representative_binding_by_program_by_authored.find(authored_key);
 
-    if (needs_direct_embedding) {
-      bool materialized_any_percussion_variant = false;
-      const auto used_variant_percussion_it = used_variant_programs_by_authored.find(authored_key);
-      if (used_variant_percussion_it == used_variant_programs_by_authored.end() ||
-          used_variant_percussion_it->second.empty()) {
-        continue;
-      }
-
-      const auto binding_map_it = binding_by_region_by_authored.find(authored_key);
-      if (binding_map_it == binding_by_region_by_authored.end()) {
-        continue;
-      }
-      const auto representative_binding_percussion_it = representative_binding_by_program_by_authored.find(authored_key);
-
-      std::set<std::pair<const VGMRgn *, SourceInstrumentRef>> embedded_regions;
+    std::set<std::pair<const VGMRgn *, SourceInstrumentRef>> embedded_regions;
       for (const auto &variant : variants) {
         if (variant.region == nullptr ||
             used_variant_percussion_it->second.find(variant.target) == used_variant_percussion_it->second.end()) {
@@ -2353,173 +2195,7 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
       if (materialized_any_percussion_variant) {
         materialized_authored_keys.insert(materialized_authored_key);
       }
-
-      continue;
     }
-
-    const auto instrument_index_it = instrument_index_by_authored.find(authored_key);
-    if (instrument_index_it == instrument_index_by_authored.end()) {
-      continue;
-    }
-    uint32_t sample_count_before_clone = 0;
-    uint32_t sample_count_after_clone = 0;
-
-    if (BAERmfEditorDocument_GetSampleCount(document, &sample_count_before_clone) != BAE_NO_ERROR) {
-      L_ERROR("Failed to query RMF sample count before cloning authored instrument");
-      return false;
-    }
-
-    BAEResult clone_result = BAERmfEditorDocument_CloneInstrumentFromBankToInstID(document,
-                                                                                  runtime.bank_token,
-                                                                                  instrument_index_it->second,
-                                                                                  default_target_inst_id,
-                                                                                  default_target_program.second);
-    if (clone_result != BAE_NO_ERROR) {
-      L_ERROR("Failed to clone temporary bank instrument for RMF bank {} program {} (BAE error #{})",
-              static_cast<unsigned>(authored_key.first),
-              static_cast<unsigned>(authored_key.second),
-              static_cast<int>(clone_result));
-      return false;
-    }
-
-    if (BAERmfEditorDocument_GetSampleCount(document, &sample_count_after_clone) != BAE_NO_ERROR ||
-        sample_count_after_clone < sample_count_before_clone) {
-      L_ERROR("Failed to query RMF sample count after cloning authored instrument");
-      return false;
-    }
-
-    materialized_authored_keys.insert(materialized_authored_key);
-
-    {
-      auto &base_sample_indices = base_sample_indices_by_authored[authored_key];
-      for (uint32_t sample_index = sample_count_before_clone; sample_index < sample_count_after_clone; ++sample_index) {
-        base_sample_indices.push_back(sample_index);
-      }
-      if (base_sample_indices.empty()) {
-        L_ERROR("Authored instrument clone produced no samples for RMF bank {} program {}",
-                static_cast<unsigned>(authored_key.first),
-                static_cast<unsigned>(authored_key.second));
-        return false;
-      }
-    }
-
-    for (const auto &variant : variants) {
-      const SourceInstrumentRef target_program = variant.target;
-      const uint32_t target_inst_id = targetInstrumentInstID(target_program);
-      const auto used_variant_authored_it = used_variant_programs_by_authored.find(authored_key);
-
-      if (used_variant_authored_it == used_variant_programs_by_authored.end() ||
-          used_variant_authored_it->second.find(target_program) == used_variant_authored_it->second.end()) {
-        continue;
-      }
-
-      if (target_program != default_target_program) {
-        const auto base_samples_it = base_sample_indices_by_authored.find(authored_key);
-        if (base_samples_it == base_sample_indices_by_authored.end()) {
-          L_ERROR("Missing base sample set for authored RMF variant bank {} program {}",
-                  static_cast<unsigned>(authored_key.first),
-                  static_cast<unsigned>(authored_key.second));
-          return false;
-        }
-
-        for (uint32_t base_sample_index : base_samples_it->second) {
-          BAERmfEditorSampleInfo base_sample_info{};
-          BAERmfEditorSampleSetup setup{};
-          uint32_t shared_asset_id = 0;
-          uint32_t new_sample_index = 0;
-          BAESampleInfo ignored_sample_info{};
-
-          if (BAERmfEditorDocument_GetSampleInfo(document, base_sample_index, &base_sample_info) != BAE_NO_ERROR) {
-              L_ERROR("Failed to read base sample metadata for authored RMF variant instrument {}",
-                static_cast<unsigned>(target_inst_id));
-            return false;
-          }
-          if (BAERmfEditorDocument_GetSampleAssetIDForSample(document, base_sample_index, &shared_asset_id) != BAE_NO_ERROR) {
-                L_ERROR("Failed to read base sample asset for authored RMF variant instrument {}",
-                  static_cast<unsigned>(target_inst_id));
-            return false;
-          }
-
-              setup.program = target_program.second;
-          setup.rootKey = base_sample_info.rootKey;
-          setup.lowKey = base_sample_info.lowKey;
-          setup.highKey = base_sample_info.highKey;
-          setup.displayName = const_cast<char *>(base_sample_info.displayName);
-
-          if (BAERmfEditorDocument_AddEmptySample(document, &setup, &new_sample_index, &ignored_sample_info) != BAE_NO_ERROR) {
-                L_ERROR("Failed to add RMF variant sample for instrument {}",
-                  static_cast<unsigned>(target_inst_id));
-            return false;
-          }
-          if (BAERmfEditorDocument_SetSampleAssetForSample(document, new_sample_index, shared_asset_id) != BAE_NO_ERROR) {
-                L_ERROR("Failed to share sample asset for RMF variant instrument {}",
-                  static_cast<unsigned>(target_inst_id));
-            return false;
-          }
-
-              base_sample_info.program = target_program.second;
-          if (BAERmfEditorDocument_SetSampleInfo(document, new_sample_index, &base_sample_info) != BAE_NO_ERROR) {
-                L_ERROR("Failed to apply RMF variant sample metadata for instrument {}",
-                  static_cast<unsigned>(target_inst_id));
-            return false;
-          }
-          if (BAERmfEditorDocument_SetSampleInstID(document, new_sample_index, target_inst_id) != BAE_NO_ERROR) {
-            L_ERROR("Failed to bind RMF variant sample to instrument {}",
-                  static_cast<unsigned>(target_inst_id));
-            return false;
-          }
-        }
-      }
-
-      for (const auto &binding : bindings) {
-        if (binding.sample == nullptr || binding.region == nullptr || binding.region != variant.region) {
-          continue;
-        }
-
-        const AuthoredInstrumentKey binding_key{
-            normalizeSourceBankForAuthoredLookup(binding.source_collection_bank),
-            binding.source_program,
-        };
-        if (binding_key != authored_key) {
-          continue;
-        }
-
-        const RegionSampleBinding *adsr_binding = &binding;
-        if (strict_authored_mode && representative_binding_it != representative_binding_by_program_by_authored.end()) {
-          const auto rep_it = representative_binding_it->second.find(target_program);
-          if (rep_it != representative_binding_it->second.end() && rep_it->second != nullptr) {
-            adsr_binding = rep_it->second;
-          }
-        }
-
-        uint32_t adsr_loop_start = 0;
-        uint32_t adsr_loop_end = 0;
-        const bool adsr_has_loop = resolveLoopPoints(*adsr_binding->sample, *adsr_binding->region, adsr_loop_start, adsr_loop_end) &&
-                                   adsr_loop_end > adsr_loop_start;
-        const bool adsr_sample_and_hold = shouldEnableSampleAndHold(*adsr_binding->region, adsr_has_loop);
-        const uint8_t adsr_root_key = resolveRootKey(*adsr_binding->sample, *adsr_binding->region);
-        const int16_t adsr_split_volume = resolveSplitVolume(*adsr_binding->sample, *adsr_binding->region);
-
-        auto existing = program_adsr_sources.find(target_program);
-        if (existing == program_adsr_sources.end()) {
-          program_adsr_sources.emplace(
-              target_program,
-              ProgramADSRSource{target_program, adsr_binding->region, adsr_sample_and_hold, adsr_root_key, adsr_split_volume});
-        }
-        else if (existing->second.region != nullptr &&
-                 preferRegionForProgramADSR(*adsr_binding->region, *existing->second.region)) {
-          existing->second.region = adsr_binding->region;
-          existing->second.sample_and_hold = existing->second.sample_and_hold || adsr_sample_and_hold;
-          existing->second.root_key = adsr_root_key;
-          existing->second.split_volume = adsr_split_volume;
-        }
-        else {
-          existing->second.sample_and_hold = existing->second.sample_and_hold || adsr_sample_and_hold;
-        }
-        break;
-      }
-    }
-  }
 
   applyProgramADSR(document, program_adsr_sources);
 
