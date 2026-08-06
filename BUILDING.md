@@ -158,9 +158,10 @@ sudo apt install build-essential cmake ninja-build qt6-base-dev \
 You can toggle specific application components using CMake options during configuration:
 
 - `ENABLE_UI_QT`: Build the main application, a Qt-based GUI (Default: `ON`).
+- `ENABLE_CLI`: Build the batch conversion CLI (`vgmtrans-cli`, Default: `ON`).
 - `ENABLE_SHELL`: Build the interactive shell (Default: `ON`). This is useful for CLI-only environments, scripting, other forms of automation.
 
-This following command, for example, will disable the Qt UI:
+Example of building only the CLI and Shell:
 ```bash
 cmake --preset <preset-name> -DENABLE_UI_QT=OFF
 ```

@@ -79,7 +79,6 @@ bool CLIVGMRoot::init() {
   // get collection for each input file
   size_t inputFileCtr = 0;
   size_t numColls = 0;
-  size_t numVGMFiles = 0;
   // map for deconflicting identical collection names using input filenames
   map<string, vector<pair<size_t, fs::path>>> collNameMap {};
   for (fs::path infile : inputFiles) {
@@ -219,13 +218,10 @@ bool CLIVGMRoot::saveMidi(const VGMColl* coll) {
 bool CLIVGMRoot::saveSF2(VGMColl* coll) {
   string collName = coll->name();
   auto filepath = UI_getSaveFilePath(collName, "sf2");
-  SF2File *sf2file = conversion::createSF2File(*coll);
+  auto sf2file = conversion::createSF2File(*coll);
   bool success = false;
-  if (sf2file != nullptr) {
-    if (sf2file->saveSF2File(filepath)) {
-      success = true;
-    }
-    delete sf2file;
+  if (sf2file && sf2file->saveSF2File(filepath)) {
+    success = true;
   }
   if (success) {
     cout << "\t" << filepath << endl;

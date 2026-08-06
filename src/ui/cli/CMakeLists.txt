@@ -1,0 +1,15 @@
+add_executable(vgmtrans-cli)
+vgmtrans_enable_project_warnings(vgmtrans-cli)
+target_sources(vgmtrans-cli
+  PRIVATE
+    CLIVGMRoot.cpp
+    main_cli.cpp
+)
+
+target_include_directories(vgmtrans-cli PUBLIC "${PROJECT_BINARY_DIR}/src")
+
+target_link_libraries(vgmtrans-cli PRIVATE vgmtranscore)
+target_compile_features(vgmtrans-cli PRIVATE cxx_std_20)
+target_compile_definitions(vgmtrans-cli PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:NOMINMAX>
+)
