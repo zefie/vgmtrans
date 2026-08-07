@@ -214,10 +214,15 @@ static constexpr uint16_t kEmbeddedTargetBanks[3] = {
     static_cast<uint16_t>(2u),
 };
 
-static constexpr SourceInstrumentRef kSilentPercussionFallbackTarget = {
-  static_cast<uint16_t>(2u),
-  static_cast<uint8_t>(127),
+// NeoBAE natural kit: MIDI bank 2 / program 0 selects percussion mode hits as
+// INST (bank*256 + 128 + note) = 640+note. Melodic bank-2 programs remain at 512+p.
+static constexpr SourceInstrumentRef kNaturalPercussionKitTarget = {
+    static_cast<uint16_t>(2u),
+    static_cast<uint8_t>(0u),
 };
+static constexpr uint32_t kNaturalPercussionNoteInstBase = 640u;
+
+static constexpr SourceInstrumentRef kSilentPercussionFallbackTarget = kNaturalPercussionKitTarget;
 
 static SourceInstrumentRef makeTargetInstrumentRefFromSlot(uint16_t slot) {
   const uint16_t bank_index = static_cast<uint16_t>(slot / 128u);
@@ -238,6 +243,23 @@ static uint16_t targetInstrumentSlot(const SourceInstrumentRef &target) {
 
 static uint32_t targetInstrumentInstID(const SourceInstrumentRef &target) {
   return static_cast<uint32_t>(target.first) * 256u + static_cast<uint32_t>(target.second);
+}
+
+// Prefer embedding melodic programs on the same MIDI bank number as the
+// authored collection bank when it fits in 0/1/2. Akao/GS songs often leave
+// bank-select MSB=1 in the MIDI stream; if playback consults channel bank
+// instead of per-note bank, INST IDs must still resolve (bank1 → 256+program).
+static uint16_t preferredEmbeddedBankForAuthored(uint8_t authored_bank) {
+  if (authored_bank == kEmbeddedTargetBanks[0] ||
+      authored_bank == kEmbeddedTargetBanks[1] ||
+      authored_bank == kEmbeddedTargetBanks[2]) {
+    return authored_bank;
+  }
+  return kEmbeddedTargetBanks[0];
+}
+
+static uint32_t naturalPercussionNoteInstID(uint8_t note) {
+  return kNaturalPercussionNoteInstBase + static_cast<uint32_t>(note & 0x7Fu);
 }
 
 static uint16_t convertCollectionBankToDocumentBank(uint16_t source_bank);
@@ -1036,6 +1058,49 @@ static void populateVolumeADSRFromRegion(const VGMRgn &region, BAERmfEditorADSRI
   add_stage(0, clamped_release_us, ADSR_TERMINATE_LONG);
 }
 
+static void applyRegionADSRToInstID(BAERmfEditorDocument *document,
+                                    uint32_t inst_id,
+                                    const ProgramADSRSource &source,
+                                    bool preserve_converted_adsr) {
+  if (source.region == nullptr) {
+    return;
+  }
+
+  BAERmfEditorInstrumentExtInfo ext_info{};
+  BAEResult get_result = BAERmfEditorDocument_GetInstrumentExtInfo(document, inst_id, &ext_info);
+  if (get_result != BAE_NO_ERROR) {
+    ext_info = {};
+    ext_info.instID = inst_id;
+    ext_info.flags1 = kZbfUseSampleRate;
+    ext_info.flags2 = 0;
+    ext_info.midiRootKey = 60;
+    ext_info.miscParameter1 = source.root_key;
+    ext_info.miscParameter2 = source.split_volume;
+  }
+
+  ext_info.instID = inst_id;
+  ext_info.hasExtendedData = static_cast<BAE_BOOL>(1);
+  ext_info.hasDefaultMod = static_cast<BAE_BOOL>(1);
+  ext_info.midiRootKey = 60;
+  ext_info.miscParameter1 = source.root_key;
+  ext_info.miscParameter2 = source.split_volume;
+  ext_info.panPlacement = static_cast<char>(convertRegionPanToRmfPan(*source.region));
+  if (source.sample_and_hold) {
+    ext_info.flags1 = static_cast<unsigned char>(ext_info.flags1 | kZbfSampleAndHold);
+  }
+  else {
+    ext_info.flags1 = static_cast<unsigned char>(ext_info.flags1 & ~kZbfSampleAndHold);
+  }
+  ext_info.flags1 = static_cast<unsigned char>(ext_info.flags1 | kZbfEnableInterpolate);
+  ext_info.flags2 = static_cast<unsigned char>(ext_info.flags2 | kZbfUseSoundModifierAsRootKey);
+  ext_info.flags2 = static_cast<unsigned char>(ext_info.flags2 & ~kZbfAdvancedInterpolation);
+  if (!preserve_converted_adsr) {
+    populateVolumeADSRFromRegion(*source.region, ext_info.volumeADSR);
+  }
+  populateRegionLfos(*source.region, ext_info);
+  BAERmfEditorDocument_SetInstrumentExtInfo(document, inst_id, &ext_info);
+}
+
 static void applyProgramADSR(
     BAERmfEditorDocument *document,
     const std::map<SourceInstrumentRef, ProgramADSRSource> &program_adsr_sources,
@@ -1046,35 +1111,8 @@ static void applyProgramADSR(
     }
 
     const uint32_t inst_id = targetInstrumentInstID(target);
-
     BAERmfEditorInstrumentExtInfo ext_info{};
-    BAEResult get_result = BAERmfEditorDocument_GetInstrumentExtInfo(document, inst_id, &ext_info);
-    if (get_result != BAE_NO_ERROR) {
-      ext_info = {};
-      ext_info.instID = inst_id;
-      ext_info.flags1 = kZbfUseSampleRate;
-      ext_info.flags2 = 0;
-      ext_info.midiRootKey = 60;
-      ext_info.miscParameter1 = source.root_key;
-      ext_info.miscParameter2 = source.split_volume;
-    }
-
-    ext_info.instID = inst_id;
-    ext_info.hasExtendedData = static_cast<BAE_BOOL>(1);
-    ext_info.hasDefaultMod = static_cast<BAE_BOOL>(1);
-    ext_info.midiRootKey = 60;
-    ext_info.miscParameter1 = source.root_key;
-    ext_info.miscParameter2 = source.split_volume;
-    ext_info.panPlacement = static_cast<char>(convertRegionPanToRmfPan(*source.region));
-    if (source.sample_and_hold) {
-      ext_info.flags1 = static_cast<unsigned char>(ext_info.flags1 | kZbfSampleAndHold);
-    }
-    else {
-      ext_info.flags1 = static_cast<unsigned char>(ext_info.flags1 & ~kZbfSampleAndHold);
-    }
-    ext_info.flags1 = static_cast<unsigned char>(ext_info.flags1 | kZbfEnableInterpolate);
-    ext_info.flags2 = static_cast<unsigned char>(ext_info.flags2 | kZbfUseSoundModifierAsRootKey);
-    ext_info.flags2 = static_cast<unsigned char>(ext_info.flags2 & ~kZbfAdvancedInterpolation);
+    const BAEResult get_result = BAERmfEditorDocument_GetInstrumentExtInfo(document, inst_id, &ext_info);
     // Keep SF2→HSB authored envelopes on cloned programs so RMF tracks mid+sf2 more closely.
     // Direct-embedded / empty variant programs still synthesize ADSR from VGMRgn data.
     const bool preserve_converted_adsr =
@@ -1082,11 +1120,21 @@ static void applyProgramADSR(
         ext_info.volumeADSR.stageCount > 0 &&
         preserve_sf2_adsr_programs != nullptr &&
         preserve_sf2_adsr_programs->find(target) != preserve_sf2_adsr_programs->end();
-    if (!preserve_converted_adsr) {
-      populateVolumeADSRFromRegion(*source.region, ext_info.volumeADSR);
+    // Cloned SF2→HSB instruments already carry correct split root keys, volumes,
+    // and flags (including multi-split layouts). applyRegionADSRToInstID would
+    // overwrite parent misc/flags from a single VGMRgn and break pitch/level
+    // (e.g. UseSoundModifierAsRootKey + misc=0 on a keymap instrument).
+    if (preserve_converted_adsr) {
+      continue;
     }
-    populateRegionLfos(*source.region, ext_info);
-    BAERmfEditorDocument_SetInstrumentExtInfo(document, inst_id, &ext_info);
+    applyRegionADSRToInstID(document, inst_id, source, false);
+  }
+}
+
+static void applyInstADSR(BAERmfEditorDocument *document,
+                          const std::map<uint32_t, ProgramADSRSource> &inst_adsr_sources) {
+  for (const auto &[inst_id, source] : inst_adsr_sources) {
+    applyRegionADSRToInstID(document, inst_id, source, false);
   }
 }
 
@@ -1196,8 +1244,23 @@ static uint8_t normalizeSourceBankForAuthoredLookup(uint16_t source_bank) {
     return static_cast<uint8_t>((source_bank >> 7) & 0x7f);
   }
 
-  // Do NOT mask bit 7: bank 128 (GM percussion) must remain distinct from bank 0.
+  // Collection-side SF2/GM percussion bank 128 must remain distinct from bank 0.
   return static_cast<uint8_t>(source_bank);
+}
+
+// Document/MIDI banks under GS packing collide with the SF2 percussion id:
+// collection bank 1 → packed document bank 128 (MSB=1,LSB=0), which is the same
+// numeric value as SF2 percussion bank 128. When reading document banks, prefer
+// the GS melodic meaning.
+static uint8_t normalizeDocumentBankForAuthoredLookup(uint16_t document_bank) {
+  if (document_bank > 128) {
+    return static_cast<uint8_t>((document_bank >> 7) & 0x7f);
+  }
+  if (document_bank == 128 &&
+      ConversionOptions::the().bankSelectStyle() == BankSelectStyle::GS) {
+    return static_cast<uint8_t>(1);
+  }
+  return static_cast<uint8_t>(document_bank);
 }
 
 static uint16_t convertCollectionBankToDocumentBank(uint16_t source_bank) {
@@ -1290,12 +1353,20 @@ static bool trackUsesPercussionBankMode(BAERmfEditorDocument *document, uint16_t
 }
 
 static bool isPercussionAuthoredBank(uint8_t source_bank) {
-  return source_bank == static_cast<uint8_t>(128);
+  // Akao and some GS-style kits use bank 127; SF2/GM percussion is bank 128.
+  return source_bank == static_cast<uint8_t>(127) || source_bank == static_cast<uint8_t>(128);
 }
 
 static bool isPercussionDocumentBank(uint16_t bank) {
-  const uint8_t normalized_bank = normalizeSourceBankForAuthoredLookup(bank);
-  return normalized_bank == static_cast<uint8_t>(127) || normalized_bank == static_cast<uint8_t>(128);
+  // Akao/GS kits use MSB 127 → packed (127<<7). Do not treat packed GS bank 1
+  // (document value 128) as percussion — that collides with SF2 perc id 128.
+  if (bank > 128) {
+    return static_cast<uint8_t>((bank >> 7) & 0x7f) == static_cast<uint8_t>(127);
+  }
+  if (bank == 128) {
+    return ConversionOptions::the().bankSelectStyle() != BankSelectStyle::GS;
+  }
+  return false;
 }
 
 static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
@@ -1423,7 +1494,17 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
       std::set<uint16_t> actual_document_banks;
       collectBanksForProgram(document, program, actual_document_banks);
       auto &known_banks = source_document_banks_by_instrument[authored_key];
-      known_banks.insert(actual_document_banks.begin(), actual_document_banks.end());
+      const bool authored_is_percussion = isPercussionAuthoredBank(authored_key.first);
+      for (uint16_t document_bank : actual_document_banks) {
+        // Program numbers are reused across melodic and percussion banks. Never
+        // attach GM/Akao percussion document banks to a melodic authored key
+        // (or the reverse) — the final RemapInstrumentReferences pass would
+        // otherwise try to remap bank 128 onto an embedded melodic slot.
+        if (isPercussionDocumentBank(document_bank) != authored_is_percussion) {
+          continue;
+        }
+        known_banks.insert(document_bank);
+      }
     }
   }
 
@@ -1471,49 +1552,8 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     return static_cast<uint16_t>(0xffff);
   };
 
-  auto allocate_percussion_target_program = [&reserved_source_slots](const std::set<uint16_t> &used_target_slots) {
-    // Prefer embedded bank 2 (0x2:*), then bank 1, then bank 0.
-    // Keeping percussion away from 0x0:* avoids accidental GM/melodic collisions.
-    const std::array<std::pair<uint16_t, uint16_t>, 3> ranges = {{
-        {256u, 384u},
-        {128u, 256u},
-        {0u, 128u},
-    }};
-
-    for (const auto &[start, end] : ranges) {
-      for (uint16_t candidate = start; candidate < end; ++candidate) {
-        if (used_target_slots.find(candidate) != used_target_slots.end()) {
-          continue;
-        }
-        if (reserved_source_slots.find(candidate) != reserved_source_slots.end()) {
-          continue;
-        }
-        return candidate;
-      }
-    }
-
-    for (const auto &[start, end] : ranges) {
-      for (uint16_t candidate = start; candidate < end; ++candidate) {
-        if (used_target_slots.find(candidate) == used_target_slots.end()) {
-          return candidate;
-        }
-      }
-    }
-
-    return static_cast<uint16_t>(0xffff);
-  };
-
-  auto allocate_percussion_default_target_program = [&reserved_source_slots,
-                                                     &allocate_percussion_target_program](const std::set<uint16_t> &used_target_slots) {
-    // First choice is slot 256: bank=2, program=0 (target instID = 512).
-    constexpr uint16_t kPreferredPercussionDefaultSlot = 256u;
-    if (used_target_slots.find(kPreferredPercussionDefaultSlot) == used_target_slots.end() &&
-        reserved_source_slots.find(kPreferredPercussionDefaultSlot) == reserved_source_slots.end()) {
-      return kPreferredPercussionDefaultSlot;
-    }
-
-    return allocate_percussion_target_program(used_target_slots);
-  };
+  // Percussion always references the natural NeoBAE kit (MIDI bank 2 / program 0).
+  // Drum hits are embedded at INST 640+note; key/velocity splits share that kit program.
 
   struct PreliminaryVariantAssignment {
     const RegionSampleBinding *binding;
@@ -1671,42 +1711,28 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     }
 
     std::map<size_t, SourceInstrumentRef> target_program_by_group_index;
-    SourceInstrumentRef forced_bank128_program{kEmbeddedTargetBanks[0], 0};
-    bool has_forced_bank128_program = false;
-    if (isPercussionAuthoredBank(authored_key.first)) {
-      const uint16_t forced_slot = allocate_percussion_default_target_program(used_target_slots);
-      if (forced_slot == 0xffff) {
-        L_ERROR("Ran out of embedded program slots while preparing percussion-bank RMF keysplit variants");
-        return false;
-      }
-      forced_bank128_program = makeTargetInstrumentRefFromSlot(forced_slot);
-      has_forced_bank128_program = true;
-      used_target_slots.insert(forced_slot);
-      L_INFO("RMF percussion authored bank {} program {} assigned dedicated target bank {} program {}",
+    const bool authored_is_percussion = isPercussionAuthoredBank(authored_key.first);
+    if (authored_is_percussion) {
+      used_target_slots.insert(targetInstrumentSlot(kNaturalPercussionKitTarget));
+      L_INFO("RMF percussion authored bank {} program {} assigned natural kit target bank {} program {} (INST {}+note)",
              static_cast<unsigned>(authored_key.first),
              static_cast<unsigned>(authored_key.second),
-             static_cast<unsigned>(forced_bank128_program.first),
-             static_cast<unsigned>(forced_bank128_program.second));
+             static_cast<unsigned>(kNaturalPercussionKitTarget.first),
+             static_cast<unsigned>(kNaturalPercussionKitTarget.second),
+             static_cast<unsigned>(kNaturalPercussionNoteInstBase));
     }
     std::vector<std::pair<VariantMaterializationSignature, SourceInstrumentRef>> assigned_entries;
     assigned_entries.reserve(preliminary_assignments.size());
     for (const auto &assignment : preliminary_assignments) {
       auto target_program_it = target_program_by_group_index.find(assignment.group_index);
       if (target_program_it == target_program_by_group_index.end()) {
-        SourceInstrumentRef target_program{kEmbeddedTargetBanks[0], authored_key.second};
-        if (isPercussionAuthoredBank(authored_key.first)) {
-          if (assignment.is_default_program && has_forced_bank128_program) {
-            target_program = forced_bank128_program;
-          }
-          else {
-            const uint16_t allocated_slot = allocate_percussion_target_program(used_target_slots);
-            if (allocated_slot == 0xffff) {
-              L_ERROR("Ran out of embedded program slots while preparing percussion-bank RMF variants");
-              return false;
-            }
-            target_program = makeTargetInstrumentRefFromSlot(allocated_slot);
-            used_target_slots.insert(allocated_slot);
-          }
+        SourceInstrumentRef target_program{
+            preferredEmbeddedBankForAuthored(authored_key.first),
+            authored_key.second};
+        if (authored_is_percussion) {
+          // All percussion variants share the natural kit MIDI reference. Note hits
+          // resolve to INST 640+note under USE_GM_PERC_BANK / channel-10 defaults.
+          target_program = kNaturalPercussionKitTarget;
         }
         else if (strict_authored_mode ||
                  !assignment.is_default_program ||
@@ -1761,9 +1787,10 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
 
     if (default_variant_program_by_authored.find(authored_key) == default_variant_program_by_authored.end()) {
       default_variant_program_by_authored[authored_key] =
-          (isPercussionAuthoredBank(authored_key.first) && has_forced_bank128_program)
-              ? forced_bank128_program
-              : SourceInstrumentRef{kEmbeddedTargetBanks[2], authored_key.second};
+          authored_is_percussion
+              ? kNaturalPercussionKitTarget
+              : SourceInstrumentRef{preferredEmbeddedBankForAuthored(authored_key.first),
+                                    authored_key.second};
     }
   }
 
@@ -1881,7 +1908,7 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
   auto resolve_authored_key_for_reference = [&](uint16_t source_bank,
                                                 uint8_t program,
                                                 AuthoredInstrumentKey &out_authored_key) {
-    const AuthoredInstrumentKey direct_key{normalizeSourceBankForAuthoredLookup(source_bank), program};
+    const AuthoredInstrumentKey direct_key{normalizeDocumentBankForAuthoredLookup(source_bank), program};
     if (variants_by_authored.find(direct_key) != variants_by_authored.end()) {
       out_authored_key = direct_key;
       if (strict_authored_mode) {
@@ -1911,7 +1938,7 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     // bank=(127-n), program=127, while authored instruments are bank=127, program=(127-n).
     // If the direct mapping fails, try this swapped lookup before broader fallbacks.
     if (program == 127) {
-      const uint8_t normalized_bank = normalizeSourceBankForAuthoredLookup(source_bank);
+      const uint8_t normalized_bank = normalizeDocumentBankForAuthoredLookup(source_bank);
       if (normalized_bank != static_cast<uint8_t>(127) && normalized_bank != static_cast<uint8_t>(128)) {
         const AuthoredInstrumentKey swapped_akao_drum_key{static_cast<uint8_t>(127), normalized_bank};
         if (variants_by_authored.find(swapped_akao_drum_key) != variants_by_authored.end()) {
@@ -2171,9 +2198,24 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
       continue;
     }
 
+    // Akao kits are bank 127 while SF2/Beatnik percussion presets usually land on bank 128.
+    if (authored_key.first == static_cast<uint8_t>(127)) {
+      const AuthoredInstrumentKey sf2_percussion_key{static_cast<uint8_t>(128), authored_key.second};
+      auto percussion_match = instrument_index_by_bank_program.find(sf2_percussion_key);
+      if (percussion_match != instrument_index_by_bank_program.end()) {
+        instrument_index_by_authored[authored_key] = percussion_match->second;
+        L_INFO("RMF temp-bank matched authored bank 127 program {} via SF2 percussion bank 128",
+               static_cast<unsigned>(authored_key.second));
+        continue;
+      }
+    }
+
     if (isPercussionAuthoredBank(authored_key.first)) {
       // SF2 percussion presets may be expanded as per-note instruments in the temporary
-      // bank; do not fall back to a melodic program-only match.
+      // bank; do not fall back to a melodic program-only match. Direct-embed instead.
+      L_INFO("RMF percussion authored bank {} program {} missing from temp bank; using direct sample embedding",
+             static_cast<unsigned>(authored_key.first),
+             static_cast<unsigned>(authored_key.second));
       continue;
     }
 
@@ -2186,7 +2228,9 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
   }
 
   std::map<SourceInstrumentRef, ProgramADSRSource> program_adsr_sources;
+  std::map<uint32_t, ProgramADSRSource> percussion_note_adsr_sources;
   std::set<SourceInstrumentRef> preserve_sf2_adsr_programs;
+  bool materialized_natural_percussion_kit = false;
   std::map<AuthoredInstrumentKey, std::vector<uint32_t>> base_sample_indices_by_authored;
   std::set<AuthoredInstrumentKey> materialized_authored_keys;
   const auto temp_dir = std::filesystem::temp_directory_path() /
@@ -2239,20 +2283,15 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
       if (binding_map_it == binding_by_region_by_authored.end()) {
         continue;
       }
-      const auto representative_binding_percussion_it = representative_binding_by_program_by_authored.find(authored_key);
 
-      std::set<std::pair<const VGMRgn *, SourceInstrumentRef>> embedded_regions;
+      const bool natural_kit_percussion = isPercussionAuthoredBank(authored_key.first);
+      std::set<std::tuple<uint8_t, const VGMRgn *, VGMSamp *>> embedded_note_regions;
+      std::set<std::pair<const VGMRgn *, SourceInstrumentRef>> embedded_melodic_regions;
       for (const auto &variant : variants) {
         if (variant.region == nullptr ||
             used_variant_percussion_it->second.find(variant.target) == used_variant_percussion_it->second.end()) {
           continue;
         }
-        if (!embedded_regions.emplace(variant.region, variant.target).second) {
-          continue;
-        }
-
-        const SourceInstrumentRef target_program = variant.target;
-        const uint32_t target_inst_id = targetInstrumentInstID(target_program);
 
         const auto binding_it = binding_map_it->second.find(variant.region);
         if (binding_it == binding_map_it->second.end() || binding_it->second == nullptr ||
@@ -2269,129 +2308,167 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
         const uint8_t root_key = resolveRootKey(*sample, *region);
         const int16_t split_volume = resolveSplitVolume(*sample, *region);
 
-        BAERmfEditorSampleSetup setup{};
-        setup.program = target_program.second;
-        setup.rootKey = root_key;
-        setup.lowKey = region->keyLow;
-        setup.highKey = region->keyHigh;
-        std::string display_name = sample->name();
-        setup.displayName = const_cast<char *>(display_name.c_str());
+        auto embed_one = [&](uint8_t low_key, uint8_t high_key, uint32_t target_inst_id, uint8_t sample_program) {
+          BAERmfEditorSampleSetup setup{};
+          setup.program = sample_program;
+          setup.rootKey = root_key;
+          setup.lowKey = low_key;
+          setup.highKey = high_key;
+          std::string display_name = sample->name();
+          setup.displayName = const_cast<char *>(display_name.c_str());
 
-        uint32_t sample_index = 0;
-        BAESampleInfo out_sample_info{};
-        BAEResult add_result = BAERmfEditorDocument_AddEmptySample(document, &setup, &sample_index, &out_sample_info);
-        auto canonical_asset_it = canonical_asset_id_by_sample.find(sample);
-        const bool has_canonical_asset = canonical_asset_it != canonical_asset_id_by_sample.end();
-        if (add_result == BAE_NO_ERROR && !has_canonical_asset) {
-          const auto wav_path = temp_dir / ("authored_sample_" + std::to_string(staged_sample_counter++) + ".wav");
-          if (!sample->saveAsWav(wav_path)) {
-            L_ERROR("Failed to stage percussion-bank sample for RMF embedding: {}", sample->name());
-            continue;
+          uint32_t sample_index = 0;
+          BAESampleInfo out_sample_info{};
+          BAEResult add_result = BAERmfEditorDocument_AddEmptySample(document, &setup, &sample_index, &out_sample_info);
+          auto canonical_asset_it = canonical_asset_id_by_sample.find(sample);
+          const bool has_canonical_asset = canonical_asset_it != canonical_asset_id_by_sample.end();
+          if (add_result == BAE_NO_ERROR && !has_canonical_asset) {
+            const auto wav_path = temp_dir / ("authored_sample_" + std::to_string(staged_sample_counter++) + ".wav");
+            if (!sample->saveAsWav(wav_path)) {
+              L_ERROR("Failed to stage percussion-bank sample for RMF embedding: {}", sample->name());
+              return false;
+            }
+            const std::string wav_path_string = wav_path.string();
+            add_result = BAERmfEditorDocument_ReplaceSampleFromFile(
+                document,
+                sample_index,
+                const_cast<char *>(wav_path_string.c_str()),
+                &out_sample_info);
           }
-          const std::string wav_path_string = wav_path.string();
-          add_result = BAERmfEditorDocument_ReplaceSampleFromFile(
-              document,
-              sample_index,
-              const_cast<char *>(wav_path_string.c_str()),
-              &out_sample_info);
-        }
-        else if (add_result == BAE_NO_ERROR) {
-          add_result = BAERmfEditorDocument_SetSampleAssetForSample(
-              document,
-              sample_index,
-              canonical_asset_it->second);
-        }
-
-        if (add_result != BAE_NO_ERROR) {
-          L_ERROR("Failed to add percussion-bank keysplit sample '{}' for program {} (BAE error #{})",
-                  sample->name(),
-              static_cast<unsigned>(target_inst_id),
-                  static_cast<int>(add_result));
-          continue;
-        }
-
-        materialized_any_percussion_variant = true;
-
-        if (!has_canonical_asset) {
-          uint32_t new_asset_id = 0;
-          if (BAERmfEditorDocument_GetSampleAssetIDForSample(document, sample_index, &new_asset_id) == BAE_NO_ERROR) {
-            canonical_asset_id_by_sample[sample] = new_asset_id;
-            canonical_sample_index_by_sample[sample] = sample_index;
+          else if (add_result == BAE_NO_ERROR) {
+            add_result = BAERmfEditorDocument_SetSampleAssetForSample(
+                document,
+                sample_index,
+                canonical_asset_it->second);
           }
-        }
 
-        BAERmfEditorSampleInfo sample_info{};
-        if (BAERmfEditorDocument_GetSampleInfo(document, sample_index, &sample_info) == BAE_NO_ERROR) {
-          sample_info.program = target_program.second;
-          sample_info.rootKey = root_key;
-          sample_info.lowKey = region->keyLow;
-          sample_info.highKey = region->keyHigh;
-          sample_info.splitVolume = split_volume;
-          applyFineTuneToSampleRate(sample_info.sampleInfo, *sample, *region);
+          if (add_result != BAE_NO_ERROR) {
+            L_ERROR("Failed to add percussion-bank keysplit sample '{}' for INST {} (BAE error #{})",
+                    sample->name(),
+                    static_cast<unsigned>(target_inst_id),
+                    static_cast<int>(add_result));
+            return false;
+          }
 
-          if (has_loop) {
-            uint32_t loop_start = resolved_loop_start;
-            uint32_t loop_end = resolved_loop_end;
-            const uint32_t wave_frames = sample_info.sampleInfo.waveFrames;
-            if (wave_frames > 1) {
-              const uint32_t max_start = wave_frames - 1;
-              loop_start = std::min(loop_start, max_start);
-              loop_end = std::min(loop_end, wave_frames);
-              refineLoopPointsWithPcm(*sample,
-                                      wave_frames,
-                                      loop_start,
-                                      loop_end,
-                                      pcm_cache,
-                                      pcm_frame_cache);
-              if (loop_end > loop_start) {
-                sample_info.sampleInfo.startLoop = loop_start;
-                sample_info.sampleInfo.endLoop = loop_end;
-              }
+          if (!has_canonical_asset) {
+            uint32_t new_asset_id = 0;
+            if (BAERmfEditorDocument_GetSampleAssetIDForSample(document, sample_index, &new_asset_id) == BAE_NO_ERROR) {
+              canonical_asset_id_by_sample[sample] = new_asset_id;
+              canonical_sample_index_by_sample[sample] = sample_index;
             }
           }
 
-          BAERmfEditorDocument_SetSampleInfo(document, sample_index, &sample_info);
-        }
+          BAERmfEditorSampleInfo sample_info{};
+          if (BAERmfEditorDocument_GetSampleInfo(document, sample_index, &sample_info) == BAE_NO_ERROR) {
+            sample_info.program = sample_program;
+            sample_info.rootKey = root_key;
+            sample_info.lowKey = low_key;
+            sample_info.highKey = high_key;
+            sample_info.splitVolume = split_volume;
+            applyFineTuneToSampleRate(sample_info.sampleInfo, *sample, *region);
 
-        BAERmfEditorDocument_SetSampleInstID(document, sample_index, target_inst_id);
+            if (has_loop) {
+              uint32_t loop_start = resolved_loop_start;
+              uint32_t loop_end = resolved_loop_end;
+              const uint32_t wave_frames = sample_info.sampleInfo.waveFrames;
+              if (wave_frames > 1) {
+                const uint32_t max_start = wave_frames - 1;
+                loop_start = std::min(loop_start, max_start);
+                loop_end = std::min(loop_end, wave_frames);
+                refineLoopPointsWithPcm(*sample,
+                                        wave_frames,
+                                        loop_start,
+                                        loop_end,
+                                        pcm_cache,
+                                        pcm_frame_cache);
+                if (loop_end > loop_start) {
+                  sample_info.sampleInfo.startLoop = loop_start;
+                  sample_info.sampleInfo.endLoop = loop_end;
+                }
+              }
+            }
+
+            BAERmfEditorDocument_SetSampleInfo(document, sample_index, &sample_info);
+          }
+
+          BAERmfEditorDocument_SetSampleInstID(document, sample_index, target_inst_id);
+          return true;
+        };
 
         const RegionSampleBinding *adsr_binding = binding_it->second;
-        if (strict_authored_mode &&
-            representative_binding_percussion_it != representative_binding_by_program_by_authored.end()) {
-          const auto rep_it = representative_binding_percussion_it->second.find(target_program);
-          if (rep_it != representative_binding_percussion_it->second.end() && rep_it->second != nullptr) {
-            adsr_binding = rep_it->second;
-          }
-        }
-
         uint32_t adsr_loop_start = 0;
         uint32_t adsr_loop_end = 0;
-        const bool adsr_has_loop = resolveLoopPoints(*adsr_binding->sample, *adsr_binding->region, adsr_loop_start, adsr_loop_end) &&
-                                   adsr_loop_end > adsr_loop_start;
+        const bool adsr_has_loop =
+            resolveLoopPoints(*adsr_binding->sample, *adsr_binding->region, adsr_loop_start, adsr_loop_end) &&
+            adsr_loop_end > adsr_loop_start;
         const bool adsr_sample_and_hold = shouldEnableSampleAndHold(*adsr_binding->region, adsr_has_loop);
         const uint8_t adsr_root_key = resolveRootKey(*adsr_binding->sample, *adsr_binding->region);
         const int16_t adsr_split_volume = resolveSplitVolume(*adsr_binding->sample, *adsr_binding->region);
 
-        auto existing = program_adsr_sources.find(target_program);
-        if (existing == program_adsr_sources.end()) {
-          program_adsr_sources.emplace(
-              target_program,
-              ProgramADSRSource{target_program, adsr_binding->region, adsr_sample_and_hold, adsr_root_key, adsr_split_volume});
-        }
-        else if (existing->second.region != nullptr &&
-                 preferRegionForProgramADSR(*adsr_binding->region, *existing->second.region)) {
-          existing->second.region = adsr_binding->region;
-          existing->second.sample_and_hold = existing->second.sample_and_hold || adsr_sample_and_hold;
-          existing->second.root_key = adsr_root_key;
-          existing->second.split_volume = adsr_split_volume;
+        if (natural_kit_percussion) {
+          const uint8_t note_low = std::min(region->keyLow, region->keyHigh);
+          const uint8_t note_high = std::max(region->keyLow, region->keyHigh);
+          for (uint16_t note = note_low; note <= note_high && note < 128; ++note) {
+            if (!embedded_note_regions.emplace(static_cast<uint8_t>(note), region, sample).second) {
+              continue;
+            }
+            const uint32_t target_inst_id = naturalPercussionNoteInstID(static_cast<uint8_t>(note));
+            if (!embed_one(static_cast<uint8_t>(note), static_cast<uint8_t>(note), target_inst_id,
+                           static_cast<uint8_t>(note))) {
+              continue;
+            }
+            materialized_any_percussion_variant = true;
+
+            ProgramADSRSource adsr_source{
+                kNaturalPercussionKitTarget,
+                adsr_binding->region,
+                adsr_sample_and_hold,
+                adsr_root_key,
+                adsr_split_volume};
+            auto existing = percussion_note_adsr_sources.find(target_inst_id);
+            if (existing == percussion_note_adsr_sources.end()) {
+              percussion_note_adsr_sources.emplace(target_inst_id, adsr_source);
+            }
+            else if (existing->second.region != nullptr &&
+                     preferRegionForProgramADSR(*adsr_binding->region, *existing->second.region)) {
+              existing->second = adsr_source;
+            }
+            else {
+              existing->second.sample_and_hold = existing->second.sample_and_hold || adsr_sample_and_hold;
+            }
+          }
         }
         else {
-          existing->second.sample_and_hold = existing->second.sample_and_hold || adsr_sample_and_hold;
+          if (!embedded_melodic_regions.emplace(region, variant.target).second) {
+            continue;
+          }
+          const uint32_t target_inst_id = targetInstrumentInstID(variant.target);
+          if (!embed_one(region->keyLow, region->keyHigh, target_inst_id, variant.target.second)) {
+            continue;
+          }
+          materialized_any_percussion_variant = true;
+
+          ProgramADSRSource adsr_source{
+              variant.target, adsr_binding->region, adsr_sample_and_hold, adsr_root_key, adsr_split_volume};
+          auto existing = program_adsr_sources.find(variant.target);
+          if (existing == program_adsr_sources.end()) {
+            program_adsr_sources.emplace(variant.target, adsr_source);
+          }
+          else if (existing->second.region != nullptr &&
+                   preferRegionForProgramADSR(*adsr_binding->region, *existing->second.region)) {
+            existing->second = adsr_source;
+          }
+          else {
+            existing->second.sample_and_hold = existing->second.sample_and_hold || adsr_sample_and_hold;
+          }
         }
       }
 
       if (materialized_any_percussion_variant) {
         materialized_authored_keys.insert(materialized_authored_key);
+        if (natural_kit_percussion) {
+          materialized_natural_percussion_kit = true;
+        }
       }
 
       continue;
@@ -2563,8 +2640,24 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
   }
 
   applyProgramADSR(document, program_adsr_sources, &preserve_sf2_adsr_programs);
+  applyInstADSR(document, percussion_note_adsr_sources);
+
+  if (materialized_authored_keys.empty()) {
+    L_ERROR("RMF export produced no materialized instruments (sourceInstruments={}, "
+            "tempBankInstruments={}, usedVariantGroups={})",
+            static_cast<unsigned>(source_instruments.size()),
+            static_cast<unsigned>(instrument_count),
+            static_cast<unsigned>(used_variant_programs_by_authored.size()));
+    return false;
+  }
+  L_INFO("RMF materialization complete: materializedAuthored={} programAdsrSources={} preservedSf2Adsr={}",
+         static_cast<unsigned>(materialized_authored_keys.size()),
+         static_cast<unsigned>(program_adsr_sources.size()),
+         static_cast<unsigned>(preserve_sf2_adsr_programs.size()));
 
   uint16_t track_count = 0;
+  std::set<uint16_t> tracks_using_natural_percussion_kit;
+  constexpr unsigned char kMidiPercussionChannel = 9;
   if (BAERmfEditorDocument_GetTrackCount(document, &track_count) == BAE_NO_ERROR) {
     std::vector<bool> track_uses_percussion_bank_mode(track_count, false);
     for (uint16_t t = 0; t < track_count; ++t) {
@@ -2579,6 +2672,8 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
 
       SourceInstrumentRef first_track_program{kEmbeddedTargetBanks[0], 0};
       bool first_track_program_set = false;
+      bool track_has_natural_percussion = false;
+      bool track_has_melodic = false;
       for (uint32_t n = 0; n < note_count; ++n) {
         BAERmfEditorNoteInfo note_info{};
         AuthoredInstrumentKey authored_key{0, 0};
@@ -2625,7 +2720,7 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
         }
 
         std::vector<SourceInstrumentRef> target_programs;
-        if (has_program_variants) {
+        if (has_program_variants && !isPercussionAuthoredBank(authored_key.first)) {
           target_programs = collectVariantProgramsForNote(
               note_info.note,
               note_info.velocity,
@@ -2661,6 +2756,15 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
 
         note_info.bank = target_programs.front().first;
         note_info.program = target_programs.front().second;
+        if (isPercussionAuthoredBank(authored_key.first)) {
+          // Natural kit playback is channel-10 note addressing (INST 640+note).
+          // Keep drums off shared melodic channels used by Akao overlays.
+          note_info.channel = kMidiPercussionChannel;
+          track_has_natural_percussion = true;
+        }
+        else {
+          track_has_melodic = true;
+        }
         BAERmfEditorDocument_SetNoteInfo(document, t, n, &note_info);
 
         for (size_t extra_index = 1; extra_index < target_programs.size(); ++extra_index) {
@@ -2694,162 +2798,68 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
       if (first_track_program_set) {
         BAERmfEditorDocument_SetTrackDefaultInstrument(document, t, first_track_program.first, first_track_program.second);
       }
+      if (track_has_natural_percussion && !track_has_melodic) {
+        BAERmfEditorTrackInfo track_info{};
+        if (BAERmfEditorDocument_GetTrackInfo(document, t, &track_info) == BAE_NO_ERROR) {
+          track_info.channel = kMidiPercussionChannel;
+          track_info.bank = kNaturalPercussionKitTarget.first;
+          track_info.program = kNaturalPercussionKitTarget.second;
+          BAERmfEditorDocument_SetTrackInfo(document, t, &track_info);
+        }
+        tracks_using_natural_percussion_kit.insert(t);
+      }
     }
   }
 
-  // Percussion channel fixup: standard MIDI percussion on channel 9 carries no CC0,
-  // so notes parse with bank=0 rather than bank=128. Remap them directly by program
-  // and inject NRPN (5,0) = USE_NORM_BANK so BAE treats channel 9 as melodic.
-  {
-    struct PercEntry {
-      const std::vector<ProgramVariant> *variants;
-      SourceInstrumentRef default_program;
-    };
-    std::map<uint8_t, PercEntry> perc_by_source_program;
-    for (const auto &[authored_key, authored_variants] : variants_by_authored) {
-      if (!isPercussionAuthoredBank(authored_key.first)) {
-        continue;
-      }
-      const auto canonical_it = canonical_authored_by_authored.find(authored_key);
-      const AuthoredInstrumentKey materialized =
-          (canonical_it != canonical_authored_by_authored.end()) ? canonical_it->second : authored_key;
-      if (materialized_authored_keys.find(materialized) == materialized_authored_keys.end()) {
-        continue;
-      }
-      const auto used_it = used_variant_programs_by_authored.find(materialized);
-      if (used_it == used_variant_programs_by_authored.end() || used_it->second.empty()) {
-        continue;
-      }
-        const SourceInstrumentRef default_prog = default_variant_program_by_authored.count(authored_key)
-          ? default_variant_program_by_authored.at(authored_key)
-          : SourceInstrumentRef{kEmbeddedTargetBanks[0], authored_key.second};
-      perc_by_source_program[authored_key.second] = {&authored_variants, default_prog};
-    }
+  // Safety pass for any percussion-bank refs that survived primary remap (e.g. track
+  // defaults). Keep natural-kit notes on MIDI channel 10 so they don't share channels
+  // with melodic Akao overlays.
+  if (materialized_natural_percussion_kit) {
+    uint16_t perc_track_count = 0;
+    if (BAERmfEditorDocument_GetTrackCount(document, &perc_track_count) == BAE_NO_ERROR) {
+      for (uint16_t t = 0; t < perc_track_count; ++t) {
+        BAERmfEditorTrackInfo track_info{};
+        if (BAERmfEditorDocument_GetTrackInfo(document, t, &track_info) != BAE_NO_ERROR) {
+          continue;
+        }
 
-    if (!perc_by_source_program.empty()) {
-      uint16_t perc_track_count = 0;
-      if (BAERmfEditorDocument_GetTrackCount(document, &perc_track_count) == BAE_NO_ERROR) {
-        for (uint16_t t = 0; t < perc_track_count; ++t) {
-          BAERmfEditorTrackInfo track_info{};
-          if (BAERmfEditorDocument_GetTrackInfo(document, t, &track_info) != BAE_NO_ERROR) {
+        uint32_t note_count = 0;
+        if (BAERmfEditorDocument_GetNoteCount(document, t, &note_count) != BAE_NO_ERROR) {
+          continue;
+        }
+
+        uint32_t remapped_note_count = 0;
+        for (uint32_t n = 0; n < note_count; ++n) {
+          BAERmfEditorNoteInfo note_info{};
+          if (BAERmfEditorDocument_GetNoteInfo(document, t, n, &note_info) != BAE_NO_ERROR) {
             continue;
           }
-
-          const bool track_uses_percussion_mode = trackUsesPercussionBankMode(document, t);
-
-          uint32_t note_count = 0;
-          if (BAERmfEditorDocument_GetNoteCount(document, t, &note_count) != BAE_NO_ERROR) {
+          if (!isPercussionDocumentBank(note_info.bank)) {
             continue;
           }
+          note_info.bank = kNaturalPercussionKitTarget.first;
+          note_info.program = kNaturalPercussionKitTarget.second;
+          note_info.channel = kMidiPercussionChannel;
+          BAERmfEditorDocument_SetNoteInfo(document, t, n, &note_info);
+          ++remapped_note_count;
+        }
 
-          bool track_has_explicit_perc_bank = isPercussionDocumentBank(track_info.bank);
-          for (uint32_t n = 0; n < note_count && !track_has_explicit_perc_bank; ++n) {
-            BAERmfEditorNoteInfo note_info{};
-            if (BAERmfEditorDocument_GetNoteInfo(document, t, n, &note_info) != BAE_NO_ERROR) {
-              continue;
-            }
-            if (isPercussionDocumentBank(note_info.bank)) {
-              track_has_explicit_perc_bank = true;
-            }
-          }
-
-          // Keep channel 10 fallback (bank may parse as 0), and also support explicit
-          // non-channel-10 percussion-bank usage (e.g. ch5/ch6 with bank 128 or NRPN perc mode).
-          if (!track_has_explicit_perc_bank && track_info.channel != 9 && !track_uses_percussion_mode) {
-            continue;
-          }
-
-          bool track_needs_nrpn = false;
-          uint32_t remapped_note_count = 0;
-
-          // Remap track default when it is explicitly on percussion bank, or channel 10 fallback.
-          if (isPercussionDocumentBank(track_info.bank) ||
-              track_info.channel == 9 ||
-              track_uses_percussion_mode) {
-            const auto perc_it = perc_by_source_program.find(track_info.program);
-            const SourceInstrumentRef default_target =
-                perc_it != perc_by_source_program.end() ? perc_it->second.default_program : kSilentPercussionFallbackTarget;
-            if (track_info.bank != default_target.first ||
-                track_info.program != default_target.second) {
-              BAERmfEditorDocument_SetTrackDefaultInstrument(document, t, default_target.first, default_target.second);
-              track_needs_nrpn = true;
-            }
-          }
-
-          const uint32_t original_note_count = note_count;
-          for (uint32_t n = 0; n < original_note_count; ++n) {
-            BAERmfEditorNoteInfo note_info{};
-            if (BAERmfEditorDocument_GetNoteInfo(document, t, n, &note_info) != BAE_NO_ERROR) {
-              continue;
-            }
-            if ((note_info.bank == kEmbeddedTargetBanks[0] ||
-                 note_info.bank == kEmbeddedTargetBanks[1] ||
-                 note_info.bank == kEmbeddedTargetBanks[2])) {
-              continue;
-            }
-
-            const bool explicit_perc_bank_note = isPercussionDocumentBank(note_info.bank);
-            const bool channel10_fallback_note = (track_info.channel == 9) && !explicit_perc_bank_note;
-            const bool nrpn_perc_fallback_note = track_uses_percussion_mode && note_info.bank == 0;
-            if (!explicit_perc_bank_note && !channel10_fallback_note && !nrpn_perc_fallback_note) {
-              continue;
-            }
-
-            const auto perc_it = perc_by_source_program.find(note_info.program);
-            std::vector<SourceInstrumentRef> targets;
-            if (perc_it == perc_by_source_program.end()) {
-              targets.push_back(kSilentPercussionFallbackTarget);
-            }
-            else {
-              targets = collectVariantProgramsForNote(
-                  note_info.note,
-                  note_info.velocity,
-                  *perc_it->second.variants,
-                  perc_it->second.default_program);
-              if (targets.empty()) {
-                targets.push_back(kSilentPercussionFallbackTarget);
-              }
-            }
-
-            note_info.bank = targets.front().first;
-            note_info.program = targets.front().second;
-            BAERmfEditorDocument_SetNoteInfo(document, t, n, &note_info);
-            track_needs_nrpn = true;
-            ++remapped_note_count;
-            for (size_t extra = 1; extra < targets.size(); ++extra) {
-              if (BAERmfEditorDocument_AddNote(document,
-                                               t,
-                                               note_info.startTick,
-                                               note_info.durationTicks,
-                                               note_info.note,
-                                               note_info.velocity) != BAE_NO_ERROR) {
-                continue;
-              }
-              uint32_t updated_count = 0;
-              if (BAERmfEditorDocument_GetNoteCount(document, t, &updated_count) != BAE_NO_ERROR ||
-                  updated_count == 0) {
-                continue;
-              }
-              BAERmfEditorNoteInfo dup = note_info;
-              dup.program = targets[extra].second;
-              dup.bank = targets[extra].first;
-              BAERmfEditorDocument_SetNoteInfo(document, t, updated_count - 1, &dup);
-            }
-          }
-
-          if (track_needs_nrpn) {
-                 L_INFO("RMF percussion remap track {} channel {} mode={} remapped {} notes to embedded banks",
-                   static_cast<unsigned>(t),
-                   static_cast<unsigned>(track_info.channel),
-                   track_uses_percussion_mode ? "nrpn" : (track_info.channel == 9 ? "ch10" : "bank128"),
-                   static_cast<unsigned>(remapped_note_count));
-            // NRPN (MSB=5, LSB=0) data-entry=3 -> USE_NORM_BANK: treat this channel as melodic.
-            BAERmfEditorDocument_AddTrackCCEvent(document, t, 99, 0, 5);
-            BAERmfEditorDocument_AddTrackCCEvent(document, t, 98, 0, 0);
-            BAERmfEditorDocument_AddTrackCCEvent(document, t, 6, 0, 3);
-          }
+        if (isPercussionDocumentBank(track_info.bank) || remapped_note_count > 0 ||
+            tracks_using_natural_percussion_kit.count(t) > 0) {
+          track_info.bank = kNaturalPercussionKitTarget.first;
+          track_info.program = kNaturalPercussionKitTarget.second;
+          track_info.channel = kMidiPercussionChannel;
+          BAERmfEditorDocument_SetTrackInfo(document, t, &track_info);
+          tracks_using_natural_percussion_kit.insert(t);
         }
       }
+    }
+    if (!tracks_using_natural_percussion_kit.empty()) {
+      L_INFO("RMF percussion using ch10 natural kit bank {}:{} on {} track(s) (INST {}+note)",
+             static_cast<unsigned>(kNaturalPercussionKitTarget.first),
+             static_cast<unsigned>(kNaturalPercussionKitTarget.second),
+             static_cast<unsigned>(tracks_using_natural_percussion_kit.size()),
+             static_cast<unsigned>(kNaturalPercussionNoteInstBase));
     }
   }
 
@@ -2960,6 +2970,12 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     if (source_ref == target_ref) {
       continue;
     }
+    // Notes/tracks are already rewritten above. RemapInstrumentReferences also
+    // rewrites bank-select aux events; packed GS banks (e.g. 128 = MSB1) have
+    // historically crashed NeoBAE here, and notes no longer need that pass.
+    if (source_ref.first > 127 || isPercussionDocumentBank(source_ref.first)) {
+      continue;
+    }
     if (BAERmfEditorDocument_RemapInstrumentReferences(document,
                                                        source_ref.first,
                                                        source_ref.second,
@@ -3001,11 +3017,12 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     return false;
   };
 
-  // Song playback on channel 10 defaults to percussion-note patch selection unless
-  // the track explicitly sets USE_NORM_BANK. Note-audition ignores this path, so
-  // force normal-bank mode whenever channel 10 references embedded authored banks.
+  // With a natural percussion kit (INST 640+note), channel 10 must stay in
+  // note-based percussion mode. Only force USE_NORM_BANK when CH10 references
+  // melodic embedded banks without a natural kit.
   uint32_t channel10_normbank_forced_tracks = 0;
-  if (BAERmfEditorDocument_GetTrackCount(document, &track_count) == BAE_NO_ERROR) {
+  if (!materialized_natural_percussion_kit &&
+      BAERmfEditorDocument_GetTrackCount(document, &track_count) == BAE_NO_ERROR) {
     for (uint16_t t = 0; t < track_count; ++t) {
       BAERmfEditorTrackInfo track_info{};
       if (BAERmfEditorDocument_GetTrackInfo(document, t, &track_info) != BAE_NO_ERROR) {
@@ -3101,6 +3118,15 @@ static bool embedAuthoredBankPrograms(BAERmfEditorDocument *document,
     const SourceInstrumentRef default_target_program = default_variant_program_by_authored[authored_key];
     for (uint16_t source_bank : source_banks) {
       if (source_bank == default_target_program.first && default_target_program.second == authored_key.second) {
+        continue;
+      }
+      if (isPercussionDocumentBank(source_bank)) {
+        continue;
+      }
+      // GS packing stores collection bank 1 as document bank 128. Primary note
+      // remap already rewrote those refs; calling RemapInstrumentReferences on
+      // packed banks has crashed NeoBAE (AV) in practice.
+      if (source_bank > 127) {
         continue;
       }
 
@@ -3712,6 +3738,7 @@ bool saveAsRMF(const VGMColl &coll,
   const bool request_zmf_by_extension = pathRequestsZmf(filepath);
 
   if (!embedAuthoredBankPrograms(document, coll, request_zmf_by_extension)) {
+    L_ERROR("RMF bank embedding failed");
     BAERmfEditorDocument_Delete(document);
     return false;
   }
@@ -3721,12 +3748,16 @@ bool saveAsRMF(const VGMColl &coll,
   uint16_t final_track_count = 0;
   if (BAERmfEditorDocument_GetTrackCount(document, &final_track_count) != BAE_NO_ERROR ||
       final_track_count == 0) {
+    L_ERROR("RMF export aborted: document has no tracks after embedding");
     BAERmfEditorDocument_Delete(document);
     return false;
   }
 
   const uint32_t final_note_count = count_total_notes();
   if (final_note_count == 0) {
+    L_ERROR("RMF export aborted: document has no notes after embedding "
+            "(initialNotes={})",
+            static_cast<unsigned>(initial_note_count));
     BAERmfEditorDocument_Delete(document);
     return false;
   }
@@ -3737,6 +3768,7 @@ bool saveAsRMF(const VGMColl &coll,
          static_cast<unsigned>(final_note_count));
 
   if (BAERmfEditorDocument_Validate(document) != BAE_NO_ERROR) {
+    L_ERROR("RMF export aborted: BAERmfEditorDocument_Validate failed");
     BAERmfEditorDocument_Delete(document);
     return false;
   }
@@ -3749,19 +3781,38 @@ bool saveAsRMF(const VGMColl &coll,
       force_zmf,
       filepath,
       request_zmf_by_extension);
-  L_INFO("RMF export decision: requested='{}' requires_zmf={} force_zmf={} resolved='{}'",
+  L_INFO("RMF export decision: requested='{}' requires_zmf={} force_zmf={} zmf_reason={} resolved='{}'",
          requested_extension,
          requires_zmf,
          force_zmf,
+         static_cast<unsigned>(zmf_reason),
          resolved_output_path.string());
   if (actual_filepath != nullptr) {
     *actual_filepath = resolved_output_path;
   }
 
-    const std::string output_path = pathToUtf8String(resolved_output_path);
+#if USE_ZMF_SUPPORT != TRUE
+  if (force_zmf || requires_zmf || pathRequestsZmf(resolved_output_path)) {
+    L_ERROR("RMF export needs ZMF (force={}, requires={}, reason={}), but this NeoBAE build "
+            "has USE_ZMF_SUPPORT disabled. Enable Vorbis/Opus/FLAC/QOA (+ ZMF) in the NeoBAE "
+            "feature profile and rebuild.",
+            force_zmf,
+            requires_zmf,
+            static_cast<unsigned>(zmf_reason));
+    BAERmfEditorDocument_Delete(document);
+    return false;
+  }
+#endif
+
+  const std::string output_path = pathToUtf8String(resolved_output_path);
   BAEResult result = BAERmfEditorDocument_SaveAsRmf(
       document,
-        const_cast<char *>(output_path.empty() ? "" : &output_path[0]));
+      const_cast<char *>(output_path.empty() ? "" : output_path.data()));
+  if (result != BAE_NO_ERROR) {
+    L_ERROR("BAERmfEditorDocument_SaveAsRmf failed for '{}' (BAE error #{})",
+            output_path,
+            static_cast<int>(result));
+  }
   BAERmfEditorDocument_Delete(document);
   return result == BAE_NO_ERROR;
 }

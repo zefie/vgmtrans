@@ -254,6 +254,7 @@ bool CLIVGMRoot::saveDLS(VGMColl* coll) {
 bool CLIVGMRoot::saveRMF(VGMColl* coll) {
   string collName = coll->name();
   auto filepath = UI_getSaveFilePath(collName, "rmf");
+  cout << "\tWriting RMF/ZMF via NeoBAE -> " << filepath << endl;
   std::filesystem::path actual_filepath = filepath;
   bool success = conversion::saveAsRMF(*coll, filepath, &actual_filepath);
   if (success) {
@@ -266,9 +267,14 @@ bool CLIVGMRoot::saveRMF(VGMColl* coll) {
       }
     }
     cout << "\t" << actual_filepath << endl;
+    if (!fs::exists(actual_filepath)) {
+      cerr << "Error: save reported success but output file was not created: "
+           << actual_filepath << endl;
+      return false;
+    }
   }
   else {
-    L_ERROR("Failed to save RMF file");
+    cerr << "Error: Failed to save RMF/ZMF file (see log messages above)" << endl;
   }
   return success;
 }
@@ -291,7 +297,12 @@ void CLIVGMRoot::UI_setRootPtr(VGMRoot** theRoot) {
 }
 
 void CLIVGMRoot::UI_log(LogItem* theLog) {
-  if (theLog->logLevel() <= LOG_LEVEL_WARN) {
+  // Surface info+ during RMF/ZMF export; the conversion path logs useful
+  // diagnostics at info that otherwise never reach the terminal.
+  const bool show_info = exportMode == CLIExportMode::RMFOnly ||
+                         exportMode == CLIExportMode::ZMFOnly;
+  if (theLog->logLevel() <= LOG_LEVEL_WARN ||
+      (show_info && theLog->logLevel() <= LOG_LEVEL_INFO)) {
     string source = theLog->source();
     string text = theLog->text();
     cerr << "[" << source << "]" << text << endl;

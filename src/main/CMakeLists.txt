@@ -16,6 +16,8 @@ if(USE_SYSTEM_NEOBAE)
     message(FATAL_ERROR "USE_SYSTEM_NEOBAE is ON, but no neobae target was exported by the package")
   endif()
 else()
+  # Conversion-only: no NeoBAE audio device backend needed (avoids winmm/dsound link deps).
+  set(BAE_PLATFORM "Dummy" CACHE STRING "Backend platform for Neobae" FORCE)
   set(BAE_DISABLE_MTHC_SUPPORT ON CACHE BOOL "Disable MTHC support in Neobae" FORCE)
   set(BAE_DISABLE_ADP_SUPPORT ON CACHE BOOL "Disable ADP support in Neobae" FORCE)
   set(BAE_DISABLE_ADX_SUPPORT ON CACHE BOOL "Disable ADX support in Neobae" FORCE)
@@ -27,14 +29,17 @@ else()
   set(BAE_DISABLE_RMI_SUPPORT ON CACHE BOOL "Disable RMI support in Neobae" FORCE)
   set(BAE_DISABLE_EMBED_PATCHES ON CACHE BOOL "Disable EMBED_PATCHES support in Neobae" FORCE)
   set(BAE_DISABLE_OPUS_ENCODER ON CACHE BOOL "Disable OPUS_ENCODER support in Neobae" FORCE)
-  set(BAE_DISABLE_OPUS_DECODER ON CACHE BOOL "Disable OPUS_DECODER support in Neobae" FORCE)
+  # ZMF container support in NeoBAE requires these decoders (and QOA). Keep them
+  # enabled so --rmf/--zmf export can write ZREZ when short loops or --zmf need it.
+  set(BAE_DISABLE_OPUS_DECODER OFF CACHE BOOL "Disable OPUS_DECODER support in Neobae" FORCE)
   set(BAE_DISABLE_VORBIS_ENCODER ON CACHE BOOL "Disable VORBIS_ENCODER support in Neobae" FORCE)
-  set(BAE_DISABLE_VORBIS_DECODER ON CACHE BOOL "Disable VORBIS_DECODER support in Neobae" FORCE)
+  set(BAE_DISABLE_VORBIS_DECODER OFF CACHE BOOL "Disable VORBIS_DECODER support in Neobae" FORCE)
   set(BAE_DISABLE_FLAC_ENCODER ON CACHE BOOL "Disable FLAC_ENCODER support in Neobae" FORCE)
-  set(BAE_DISABLE_FLAC_DECODER ON CACHE BOOL "Disable FLAC_DECODER support in Neobae" FORCE)
+  set(BAE_DISABLE_FLAC_DECODER OFF CACHE BOOL "Disable FLAC_DECODER support in Neobae" FORCE)
   set(BAE_DISABLE_MP3_ENCODER ON CACHE BOOL "Disable MP3_ENCODER support in Neobae" FORCE)
   set(BAE_DISABLE_MP3_DECODER ON CACHE BOOL "Disable MP3_DECODER support in Neobae" FORCE)
-  set(BAE_DISABLE_QOA_SUPPORT ON CACHE BOOL "Disable QOA support in Neobae" FORCE)
+  set(BAE_DISABLE_QOA_SUPPORT OFF CACHE BOOL "Disable QOA support in Neobae" FORCE)
+  set(BAE_DISABLE_ZMF_SUPPORT OFF CACHE BOOL "Disable ZMF support in Neobae" FORCE)
   set(BAE_DISABLE_RETRO_RINGTONE_SUPPORT ON CACHE BOOL "Disable RETRO RINGTONE support in Neobae" FORCE)
   set(BUILD_ZEFIDI OFF CACHE BOOL "Disable building ZEFIDI in Neobae" FORCE)
   set(BUILD_CLITOOLS OFF CACHE BOOL "Disable building CLITOOLS in Neobae" FORCE)
@@ -44,13 +49,6 @@ else()
   set(BUILD_TESTING OFF CACHE BOOL "Disable building tests in Neobae" FORCE)
 
   add_subdirectory(${PROJECT_SOURCE_DIR}/lib/neobae ${CMAKE_CURRENT_BINARY_DIR}/lib/neobae EXCLUDE_FROM_ALL)
-
-  # Enforce the Neobae feature profile from VGMTrans.
-  target_compile_definitions(
-    neobae
-    PUBLIC
-      USE_ZMF_SUPPORT=1
-  )
 endif()
 
 # nlohmann-json is a header-only library,
