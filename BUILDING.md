@@ -161,7 +161,7 @@ You can toggle specific application components using CMake options during config
 - `ENABLE_CLI`: Build the batch conversion CLI (`vgmtrans-cli`, Default: `ON`).
 - `ENABLE_SHELL`: Build the interactive shell (Default: `ON`). This is useful for CLI-only environments, scripting, other forms of automation.
 
-Example of building only the CLI and Shell:
+This following command, for example, will disable the Qt UI:
 ```bash
 cmake --preset <preset-name> -DENABLE_UI_QT=OFF
 ```

@@ -1,6 +1,7 @@
 app-id: io.github.vgmtrans.vgmtrans
 runtime: org.kde.Platform
-runtime-version: '6.10'
+# Keep this branch aligned with the KDE builder image in .github/workflows/build.yml.
+runtime-version: '6.11'
 sdk: org.kde.Sdk
 command: vgmtrans
 finish-args:
@@ -32,7 +33,6 @@ modules:
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
       - -DENABLE_UI_QT=ON
-      - -DENABLE_CLI=OFF
       - -DENABLE_SHELL=OFF
       - -DNO_QT_DEPLOY=ON
       - -DINSTALL_CHANGELOG=ON
